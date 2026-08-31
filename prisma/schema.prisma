@@ -1,0 +1,429 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum LifeStatus {
+  ON_TRACK
+  WATCH
+  AT_RISK
+  OFF_TRACK
+}
+
+enum MetricValueType {
+  NUMBER
+  BOOLEAN
+  SCALE_1_10
+  TEXT
+}
+
+enum CompletionState {
+  COMPLETED
+  PARTIAL
+  SKIPPED
+  MISSED
+}
+
+enum TaskPriority {
+  MOST_IMPORTANT
+  CRITICAL
+  SECONDARY
+  OPTIONAL
+}
+
+enum AlertSeverity {
+  INFO
+  WATCH
+  AT_RISK
+  OFF_TRACK
+}
+
+enum EmailDirection {
+  OUTBOUND
+  INBOUND
+}
+
+enum ConfirmationStatus {
+  AUTO_ACCEPTED
+  NEEDS_CONFIRMATION
+  CONFIRMED
+  REJECTED
+  ERROR
+}
+
+enum EmailMutationStatus {
+  PROPOSED
+  APPLIED
+  REJECTED
+  FAILED
+}
+
+model User {
+  id String @id @default(cuid())
+  email String @unique
+  passwordHash String
+  name String?
+  lifeAreas LifeArea[]
+  objectives Objective[]
+  keyResults KeyResult[]
+  metricDefinitions MetricDefinition[]
+  metricEntries MetricEntry[]
+  habits Habit[]
+  habitCompletions HabitCompletion[]
+  supplements Supplement[]
+  supplementLogs SupplementLog[]
+  tasks Task[]
+  taskCompletions TaskCompletion[]
+  dailyCheckIns DailyCheckIn[]
+  dailyScores DailyScore[]
+  weeklyReviews WeeklyReview[]
+  alertRules AlertRule[]
+  alertEvents AlertEvent[]
+  notificationPreferences NotificationPreference[]
+  emailMessages EmailMessage[]
+  emailParsedEntries EmailParsedEntry[]
+  emailMutations EmailMutation[]
+  settings UserSetting[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model LifeArea {
+  id String @id @default(cuid())
+  userId String
+  key String
+  name String
+  description String?
+  weight Int @default(0)
+  sortOrder Int @default(0)
+  active Boolean @default(true)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  objectives Objective[]
+  habits Habit[]
+  tasks Task[]
+  @@unique([userId, key])
+  @@index([userId, active, sortOrder])
+}
+
+model Objective {
+  id String @id @default(cuid())
+  userId String
+  lifeAreaId String
+  title String
+  description String?
+  status LifeStatus @default(ON_TRACK)
+  dueDate DateTime?
+  active Boolean @default(true)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lifeArea LifeArea @relation(fields: [lifeAreaId], references: [id], onDelete: Cascade)
+  keyResults KeyResult[]
+  habits Habit[]
+  tasks Task[]
+  @@index([userId, lifeAreaId, active])
+}
+
+model KeyResult {
+  id String @id @default(cuid())
+  userId String
+  objectiveId String
+  title String
+  target Float?
+  currentValue Float?
+  unit String?
+  status LifeStatus @default(ON_TRACK)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  objective Objective @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
+  @@index([userId, objectiveId])
+}
+
+model MetricDefinition {
+  id String @id @default(cuid())
+  userId String
+  key String
+  name String
+  valueType MetricValueType
+  unit String?
+  category String
+  defaultTarget Float?
+  important Boolean @default(false)
+  active Boolean @default(true)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  entries MetricEntry[]
+  @@unique([userId, key])
+  @@index([userId, active])
+}
+
+model MetricEntry {
+  id String @id @default(cuid())
+  userId String
+  metricDefinitionId String
+  localDate DateTime @db.Date
+  valueNumber Float?
+  valueText String?
+  valueBoolean Boolean?
+  source String @default("manual")
+  note String?
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  metricDefinition MetricDefinition @relation(fields: [metricDefinitionId], references: [id], onDelete: Cascade)
+  @@unique([userId, metricDefinitionId, localDate])
+  @@index([userId, localDate])
+}
+
+model Habit {
+  id String @id @default(cuid())
+  userId String
+  lifeAreaId String
+  objectiveId String?
+  key String
+  name String
+  targetCount Int @default(1)
+  targetPeriod String @default("day")
+  scoreWeight Float @default(1)
+  active Boolean @default(true)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lifeArea LifeArea @relation(fields: [lifeAreaId], references: [id], onDelete: Cascade)
+  objective Objective? @relation(fields: [objectiveId], references: [id], onDelete: SetNull)
+  schedules HabitSchedule[]
+  completions HabitCompletion[]
+  @@unique([userId, key])
+}
+
+model HabitSchedule {
+  id String @id @default(cuid())
+  habitId String
+  daysOfWeek Json?
+  habit Habit @relation(fields: [habitId], references: [id], onDelete: Cascade)
+}
+
+model HabitCompletion {
+  id String @id @default(cuid())
+  userId String
+  habitId String
+  localDate DateTime @db.Date
+  state CompletionState @default(COMPLETED)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  habit Habit @relation(fields: [habitId], references: [id], onDelete: Cascade)
+  @@unique([userId, habitId, localDate])
+}
+
+model Supplement {
+  id String @id @default(cuid())
+  userId String
+  name String
+  intendedDose Float?
+  doseUnit String?
+  normalTime String?
+  active Boolean @default(true)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  schedules SupplementSchedule[]
+  logs SupplementLog[]
+}
+
+model SupplementSchedule {
+  id String @id @default(cuid())
+  supplementId String
+  daysOfWeek Json?
+  supplement Supplement @relation(fields: [supplementId], references: [id], onDelete: Cascade)
+}
+
+model SupplementLog {
+  id String @id @default(cuid())
+  userId String
+  supplementId String
+  localDate DateTime @db.Date
+  state CompletionState @default(COMPLETED)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  supplement Supplement @relation(fields: [supplementId], references: [id], onDelete: Cascade)
+  @@unique([userId, supplementId, localDate])
+}
+
+model Task {
+  id String @id @default(cuid())
+  userId String
+  lifeAreaId String?
+  objectiveId String?
+  title String
+  priority TaskPriority @default(SECONDARY)
+  dueDate DateTime? @db.Date
+  active Boolean @default(true)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lifeArea LifeArea? @relation(fields: [lifeAreaId], references: [id], onDelete: SetNull)
+  objective Objective? @relation(fields: [objectiveId], references: [id], onDelete: SetNull)
+  recurrenceRule RecurrenceRule?
+  completions TaskCompletion[]
+  @@index([userId, active])
+}
+
+model RecurrenceRule {
+  id String @id @default(cuid())
+  taskId String @unique
+  frequency String @default("DAILY")
+  daysOfWeek Json?
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+}
+
+model TaskCompletion {
+  id String @id @default(cuid())
+  userId String
+  taskId String
+  localDate DateTime @db.Date
+  state CompletionState @default(COMPLETED)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  @@unique([userId, taskId, localDate])
+}
+
+model DailyCheckIn {
+  id String @id @default(cuid())
+  userId String
+  localDate DateTime @db.Date
+  timezone String
+  reflection String?
+  completedAt DateTime?
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([userId, localDate])
+}
+
+model DailyScore {
+  id String @id @default(cuid())
+  userId String
+  localDate DateTime @db.Date
+  score Int
+  status LifeStatus
+  summary String
+  algorithmVersion String @default("v1")
+  snapshot Json
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  components DailyScoreComponent[]
+  @@unique([userId, localDate])
+}
+
+model DailyScoreComponent {
+  id String @id @default(cuid())
+  dailyScoreId String
+  label String
+  expected Int
+  completed Int
+  weight Float
+  contribution Float
+  details Json?
+  dailyScore DailyScore @relation(fields: [dailyScoreId], references: [id], onDelete: Cascade)
+}
+
+model WeeklyReview {
+  id String @id @default(cuid())
+  userId String
+  weekStart DateTime @db.Date
+  weekEnd DateTime @db.Date
+  overallScore Int
+  strongestArea String?
+  weakestArea String?
+  improved Json
+  deteriorated Json
+  neglected Json
+  recommendations Json
+  reflection String?
+  snapshot Json
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([userId, weekStart])
+}
+
+model AlertRule {
+  id String @id @default(cuid())
+  userId String
+  key String
+  name String
+  severity AlertSeverity @default(WATCH)
+  config Json
+  active Boolean @default(true)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  events AlertEvent[]
+  @@unique([userId, key])
+}
+
+model AlertEvent {
+  id String @id @default(cuid())
+  userId String
+  alertRuleId String?
+  localDate DateTime @db.Date
+  status LifeStatus
+  title String
+  explanation String
+  expectedValue String
+  observedValue String
+  period String
+  recommendedAction String
+  fingerprint String
+  resolvedAt DateTime?
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  alertRule AlertRule? @relation(fields: [alertRuleId], references: [id], onDelete: SetNull)
+  @@unique([userId, fingerprint, localDate])
+}
+
+model NotificationPreference {
+  id String @id @default(cuid())
+  userId String
+  channel String
+  eventType String
+  enabled Boolean @default(true)
+  minSeverity AlertSeverity @default(WATCH)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([userId, channel, eventType])
+}
+
+model EmailMessage {
+  id String @id @default(cuid())
+  userId String
+  direction EmailDirection
+  messageType String
+  subject String
+  bodyText String
+  sender String?
+  recipient String?
+  provider String?
+  providerMessageId String?
+  triggerFingerprint String?
+  suppressed Boolean @default(false)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  parsedEntries EmailParsedEntry[]
+  mutations EmailMutation[]
+  createdAt DateTime @default(now())
+}
+
+model EmailParsedEntry {
+  id String @id @default(cuid())
+  userId String
+  emailMessageId String
+  fieldKey String
+  rawValue String
+  parsedValue Json
+  confidence Float
+  confirmationStatus ConfirmationStatus @default(NEEDS_CONFIRMATION)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emailMessage EmailMessage @relation(fields: [emailMessageId], references: [id], onDelete: Cascade)
+}
+
+model EmailMutation {
+  id String @id @default(cuid())
+  userId String
+  emailMessageId String
+  targetModel String
+  operation String
+  payload Json
+  status EmailMutationStatus @default(PROPOSED)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emailMessage EmailMessage @relation(fields: [emailMessageId], references: [id], onDelete: Cascade)
+}
+
+model UserSetting {
+  id String @id @default(cuid())
+  userId String
+  key String
+  value Json
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([userId, key])
+}

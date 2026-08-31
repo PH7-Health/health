@@ -1,0 +1,141 @@
+import { CompletionState, LifeStatus, TaskPriority } from "@prisma/client";
+
+import { prisma } from "@/lib/db/prisma";
+import { addDays, localDate, weekStart } from "./date";
+import { calculateScore, type ScorePart } from "./score";
+
+const areas = [
+  ["health", "Health", 35], ["work", "Work", 25], ["relationships", "Relationships", 15], ["development", "Development", 10], ["environment", "Environment", 10], ["fun", "Adventure & fun", 5]
+] as const;
+const metrics = [
+  ["weight", "Weight", "NUMBER", "kg", "body", false], ["sleep_duration", "Sleep duration", "NUMBER", "h", "sleep", true], ["sleep_quality", "Sleep quality", "SCALE_1_10", null, "sleep", true], ["steps", "Steps", "NUMBER", "steps", "activity", true], ["protein", "Protein", "NUMBER", "g", "nutrition", true], ["mood", "Mood", "SCALE_1_10", null, "subjective", true], ["energy", "Energy", "SCALE_1_10", null, "subjective", true], ["focus", "Focus", "SCALE_1_10", null, "subjective", true]
+] as const;
+
+export async function ensureLifeOsSeed(userId: string) {
+  if (await prisma.lifeArea.count({ where: { userId } })) return;
+  const created = await Promise.all(areas.map(([key, name, weight], sortOrder) => prisma.lifeArea.create({ data: { userId, key, name, weight, sortOrder } })));
+  const byKey = new Map(created.map((area) => [area.key, area.id]));
+  const healthObjective = await prisma.objective.create({ data: { userId, lifeAreaId: byKey.get("health")!, title: "Build a durable health baseline", description: "Prioritise sleep, movement, nutrition, and recovery." } });
+  const workObjective = await prisma.objective.create({ data: { userId, lifeAreaId: byKey.get("work")!, title: "Protect focused, meaningful work", description: "Choose one outcome and make deliberate progress." } });
+  await prisma.keyResult.createMany({ data: [{ userId, objectiveId: healthObjective.id, title: "Maintain an evidence-based weekly health rhythm" }, { userId, objectiveId: workObjective.id, title: "Complete the week’s highest-leverage work" }] });
+  await prisma.metricDefinition.createMany({ data: metrics.map(([key, name, valueType, unit, category, important]) => ({ userId, key, name, valueType, unit, category, important })) });
+  await prisma.habit.createMany({ data: [
+    { userId, lifeAreaId: byKey.get("health")!, objectiveId: healthObjective.id, key: "training", name: "Move with intent", targetCount: 1, scoreWeight: 1.4 },
+    { userId, lifeAreaId: byKey.get("health")!, objectiveId: healthObjective.id, key: "nutrition", name: "Meet nutrition target", targetCount: 1, scoreWeight: 1 },
+    { userId, lifeAreaId: byKey.get("work")!, objectiveId: workObjective.id, key: "deep_work", name: "Focused work block", targetCount: 1, scoreWeight: 1.3 },
+    { userId, lifeAreaId: byKey.get("relationships")!, key: "connection", name: "Intentional connection", targetCount: 1, scoreWeight: 1 },
+    { userId, lifeAreaId: byKey.get("environment")!, key: "reset", name: "Ten-minute reset", targetCount: 1, scoreWeight: 0.7 }
+  ] });
+  await prisma.supplement.createMany({ data: [
+    { userId, name: "Creatine", intendedDose: 5, doseUnit: "g", normalTime: "Morning" },
+    { userId, name: "Vitamin D3", intendedDose: 1, doseUnit: "dose", normalTime: "Morning" },
+    { userId, name: "Magnesium", intendedDose: 1, doseUnit: "dose", normalTime: "Evening" }
+  ] });
+  await prisma.task.createMany({ data: [
+    { userId, lifeAreaId: byKey.get("work")!, objectiveId: workObjective.id, title: "Define today’s most important outcome", priority: "MOST_IMPORTANT" },
+    { userId, lifeAreaId: byKey.get("work")!, title: "Review critical commitments", priority: "CRITICAL" },
+    { userId, lifeAreaId: byKey.get("development")!, title: "Plan tomorrow’s first move", priority: "SECONDARY" }
+  ] });
+  await prisma.alertRule.create({ data: { userId, key: "low_score_three_days", name: "Three-day score drift", severity: "AT_RISK", config: { threshold: 60, days: 3 } } });
+  await prisma.notificationPreference.createMany({ data: [{ userId, channel: "email", eventType: "drift", enabled: true, minSeverity: "WATCH" }, { userId, channel: "email", eventType: "weekly_review", enabled: true, minSeverity: "INFO" }] });
+}
+
+export async function getTodayView(userId: string) {
+  await ensureLifeOsSeed(userId);
+  const date = localDate();
+  const [areas, objectives, metrics, entries, habits, habitCompletions, supplements, supplementLogs, tasks, taskCompletions, checkIn] = await Promise.all([
+    prisma.lifeArea.findMany({ where: { userId, active: true }, orderBy: { sortOrder: "asc" } }),
+    prisma.objective.findMany({ where: { userId, active: true }, include: { keyResults: true } }),
+    prisma.metricDefinition.findMany({ where: { userId, active: true }, orderBy: { name: "asc" } }),
+    prisma.metricEntry.findMany({ where: { userId, localDate: date } }),
+    prisma.habit.findMany({ where: { userId, active: true }, include: { lifeArea: true }, orderBy: { name: "asc" } }),
+    prisma.habitCompletion.findMany({ where: { userId, localDate: date } }),
+    prisma.supplement.findMany({ where: { userId, active: true }, orderBy: { name: "asc" } }),
+    prisma.supplementLog.findMany({ where: { userId, localDate: date } }),
+    prisma.task.findMany({ where: { userId, active: true }, include: { lifeArea: true }, orderBy: { priority: "asc" } }),
+    prisma.taskCompletion.findMany({ where: { userId, localDate: date } }),
+    prisma.dailyCheckIn.findUnique({ where: { userId_localDate: { userId, localDate: date } } })
+  ]);
+  const score = await recalculateScore(userId, date, { habits, habitCompletions, supplements, supplementLogs, tasks, taskCompletions });
+  const alerts = await evaluateDrift(userId, date);
+  return { date, areas, objectives, metrics, entries, habits, habitCompletions, supplements, supplementLogs, tasks, taskCompletions, checkIn, ...score, alerts };
+}
+
+type ScoreInputs = { habits: Array<{ id: string; lifeArea: { name: string } }>; habitCompletions: Array<{ habitId: string; state: CompletionState }>; supplements: Array<{ id: string }>; supplementLogs: Array<{ supplementId: string; state: CompletionState }>; tasks: Array<{ id: string }>; taskCompletions: Array<{ taskId: string; state: CompletionState }> };
+
+async function recalculateScore(userId: string, date: Date, state: ScoreInputs) {
+  const complete = (items: Array<{ state: CompletionState }>) => items.filter((item) => item.state === "COMPLETED").length;
+  const habitsByArea = new Map<string, { expected: number; completed: number }>();
+  for (const habit of state.habits) { const current = habitsByArea.get(habit.lifeArea.name) ?? { expected: 0, completed: 0 }; current.expected += 1; if (state.habitCompletions.some((item) => item.habitId === habit.id && item.state === "COMPLETED")) current.completed += 1; habitsByArea.set(habit.lifeArea.name, current); }
+  const parts: ScorePart[] = [...habitsByArea.entries()].map(([label, value]) => ({ label, ...value, weight: label === "Health" ? 1.4 : 1 })).concat([
+    { label: "Supplements", expected: state.supplements.length, completed: complete(state.supplementLogs), weight: 0.8 },
+    { label: "Tasks", expected: state.tasks.length, completed: complete(state.taskCompletions), weight: 1 }
+  ]).filter((part) => part.expected > 0);
+  const result = calculateScore(parts);
+  const summary = result.score >= 82 ? "The core loop is holding." : result.score >= 68 ? "A few deliberate actions will steady the day." : "Protect one recovery action and one meaningful commitment.";
+  const status = result.status as LifeStatus;
+  const dailyScore = await prisma.dailyScore.upsert({ where: { userId_localDate: { userId, localDate: date } }, update: { score: result.score, status, summary, snapshot: result }, create: { userId, localDate: date, score: result.score, status, summary, snapshot: result } });
+  await prisma.dailyScoreComponent.deleteMany({ where: { dailyScoreId: dailyScore.id } });
+  if (result.parts.length) await prisma.dailyScoreComponent.createMany({ data: result.parts.map((part) => ({ dailyScoreId: dailyScore.id, ...part })) });
+  return { ...result, summary };
+}
+
+export async function evaluateDrift(userId: string, date = localDate()) {
+  const scores = await prisma.dailyScore.findMany({ where: { userId, localDate: { gte: addDays(date, -2), lte: date } }, orderBy: { localDate: "asc" } });
+  if (scores.length < 3 || scores.reduce((sum, item) => sum + item.score, 0) / scores.length >= 60) return prisma.alertEvent.findMany({ where: { userId, resolvedAt: null, localDate: date } });
+  const rule = await prisma.alertRule.findUnique({ where: { userId_key: { userId, key: "low_score_three_days" } } });
+  if (!rule) return [];
+  const observed = Math.round(scores.reduce((sum, item) => sum + item.score, 0) / scores.length);
+  await prisma.alertEvent.upsert({ where: { userId_fingerprint_localDate: { userId, fingerprint: "low-score-three-days", localDate: date } }, update: {}, create: { userId, alertRuleId: rule.id, localDate: date, status: "AT_RISK", title: "Three-day score drift", explanation: "The rolling score has remained below the recovery threshold for three days.", expectedValue: "60 or above", observedValue: String(observed), period: "Last 3 days", recommendedAction: "Choose one health action and one essential task, then reduce optional commitments.", fingerprint: "low-score-three-days" } });
+  return prisma.alertEvent.findMany({ where: { userId, resolvedAt: null, localDate: date } });
+}
+
+export async function setCompletion(userId: string, type: "task" | "habit" | "supplement", id: string) {
+  const date = localDate();
+  if (type === "task") await prisma.taskCompletion.upsert({ where: { userId_taskId_localDate: { userId, taskId: id, localDate: date } }, update: { state: "COMPLETED" }, create: { userId, taskId: id, localDate: date } });
+  if (type === "habit") await prisma.habitCompletion.upsert({ where: { userId_habitId_localDate: { userId, habitId: id, localDate: date } }, update: { state: "COMPLETED" }, create: { userId, habitId: id, localDate: date } });
+  if (type === "supplement") await prisma.supplementLog.upsert({ where: { userId_supplementId_localDate: { userId, supplementId: id, localDate: date } }, update: { state: "COMPLETED" }, create: { userId, supplementId: id, localDate: date } });
+  await getTodayView(userId);
+}
+
+export async function addTask(userId: string, title: string, priority: TaskPriority) {
+  if (!title.trim()) return;
+  await prisma.task.create({ data: { userId, title: title.trim(), priority } });
+}
+
+export async function saveCheckIn(userId: string, fields: Record<string, FormDataEntryValue>) {
+  const date = localDate();
+  const definitions = await prisma.metricDefinition.findMany({ where: { userId, active: true } });
+  await Promise.all(definitions.flatMap((definition) => { const raw = fields[definition.key]; if (typeof raw !== "string" || raw.trim() === "" || Number.isNaN(Number(raw))) return []; return prisma.metricEntry.upsert({ where: { userId_metricDefinitionId_localDate: { userId, metricDefinitionId: definition.id, localDate: date } }, update: { valueNumber: Number(raw) }, create: { userId, metricDefinitionId: definition.id, localDate: date, valueNumber: Number(raw) } }); }));
+  await prisma.dailyCheckIn.upsert({ where: { userId_localDate: { userId, localDate: date } }, update: { reflection: String(fields.reflection ?? "").trim() || null, completedAt: new Date() }, create: { userId, localDate: date, timezone: "Europe/Lisbon", reflection: String(fields.reflection ?? "").trim() || null, completedAt: new Date() } });
+  await getTodayView(userId);
+}
+
+export async function getDashboardView(userId: string) {
+  const today = await getTodayView(userId);
+  const scores = await prisma.dailyScore.findMany({ where: { userId, localDate: { gte: addDays(today.date, -29) } }, orderBy: { localDate: "asc" } });
+  return { ...today, scores, seven: scores.slice(-7), thirty: scores, average7: average(scores.slice(-7).map((item) => item.score)), average30: average(scores.map((item) => item.score)) };
+}
+
+export async function getWeeklyReview(userId: string) {
+  const start = weekStart(); const end = addDays(start, 6);
+  const scores = await prisma.dailyScore.findMany({ where: { userId, localDate: { gte: start, lte: end } }, include: { components: true } });
+  const averageScore = Math.round(average(scores.map((item) => item.score)));
+  const components = new Map<string, number[]>();
+  scores.forEach((score) => score.components.forEach((part) => components.set(part.label, [...(components.get(part.label) ?? []), part.contribution])));
+  const ranked = [...components.entries()].map(([label, values]) => ({ label, value: average(values) })).sort((a, b) => b.value - a.value);
+  const neglected = (await prisma.lifeArea.findMany({ where: { userId, active: true } })).filter((area) => !ranked.some((item) => item.label === area.name)).map((area) => ({ area: area.name, reason: "No scored leading action this week." }));
+  const data = { userId, weekStart: start, weekEnd: end, overallScore: averageScore, strongestArea: ranked[0]?.label, weakestArea: ranked.at(-1)?.label, improved: [], deteriorated: [], neglected, recommendations: neglected.length ? [{ title: `Schedule one ${neglected[0].area} action first.`, severity: "WATCH" }] : [{ title: "Keep the core loop stable next week.", severity: "INFO" }], snapshot: { scores: scores.map((item) => ({ date: item.localDate, score: item.score })) } };
+  return prisma.weeklyReview.upsert({ where: { userId_weekStart: { userId, weekStart: start } }, update: data, create: data });
+}
+
+export async function saveWeeklyReflection(userId: string, reflection: string) { const review = await getWeeklyReview(userId); return prisma.weeklyReview.update({ where: { id: review.id }, data: { reflection } }); }
+
+export async function persistInboundEmail(userId: string, input: { sender?: string; subject: string; bodyText: string; provider?: string; providerMessageId?: string }) {
+  const message = await prisma.emailMessage.create({ data: { userId, direction: "INBOUND", messageType: "check_in_reply", subject: input.subject, bodyText: input.bodyText, sender: input.sender, provider: input.provider, providerMessageId: input.providerMessageId } });
+  const matches = [{ fieldKey: "sleep_duration", regex: /slept\s+(\d+(?:\.\d+)?)/i }, { fieldKey: "mood", regex: /mood\s+(\d+)/i }, { fieldKey: "energy", regex: /energy\s+(\d+)/i }, { fieldKey: "steps", regex: /steps\s+(\d+)/i }].flatMap((pattern) => { const hit = input.bodyText.match(pattern.regex); return hit ? [{ ...pattern, rawValue: hit[0], value: Number(hit[1]) }] : []; });
+  await Promise.all(matches.flatMap((match) => [prisma.emailParsedEntry.create({ data: { userId, emailMessageId: message.id, fieldKey: match.fieldKey, rawValue: match.rawValue, parsedValue: { value: match.value }, confidence: 0.85 } }), prisma.emailMutation.create({ data: { userId, emailMessageId: message.id, targetModel: "MetricEntry", operation: "upsert", payload: { key: match.fieldKey, value: match.value }, status: "PROPOSED" } })]));
+  return { message, parsedCount: matches.length };
+}
+
+const average = (values: number[]) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
