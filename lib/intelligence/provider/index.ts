@@ -1,4 +1,5 @@
 import { z, type ZodIssue } from "zod";
+import { coachingAnswerSchema, weeklyCoachingSchema, type CoachingAnswer, type WeeklyCoaching } from "../coaching-schema";
 
 export const PATHWAY_SCHEMA_VERSION = "v3";
 const confidenceValues = ["HIGH", "MEDIUM", "LOW", "INSUFFICIENT_DATA"] as const;
@@ -148,4 +149,19 @@ function diagnostic(model: string | null, requestId: string | null, status: Resp
 
 export const deterministicProvider = new DeterministicProvider();
 export const intelligenceProvider: IntelligenceProvider = process.env.OPENAI_API_KEY ? new OpenAIProvider() : deterministicProvider;
+
+async function generateCoaching<T>(operation: "ask_life_os" | "weekly_coaching", brief: unknown, schema: { parse: (value: unknown) => T }, name: string): Promise<{ provider: string; model: string | null; requestId: string | null; output: T }> {
+  const apiKey = process.env.OPENAI_API_KEY; const model = process.env.OPENAI_MODEL;
+  if (!apiKey || !model) throw new IntelligenceProviderError("OpenAI is not configured for this environment.", "MISSING_CONFIGURATION");
+  const response = await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" }, body: JSON.stringify({ model, instructions: `You are Life OS coaching intelligence. Use only the supplied evidence brief. Label uncertainty; never invent facts or causation. ${operation === "weekly_coaching" ? "Return at most three priorities and allow empty sections." : "Give concise decision-oriented guidance; recommendations must be grounded in the brief."}`, input: JSON.stringify(brief), text: { format: { type: "json_schema", name, strict: true, schema: operation === "ask_life_os" ? coachingJsonSchema : weeklyJsonSchema } } }) });
+  const requestId = response.headers.get("x-request-id"); if (!response.ok) throw new IntelligenceProviderError(`OpenAI coaching request failed (${response.status}).`, "REQUEST_FAILED");
+  const body = await response.json() as { output?: Array<{ content?: Array<{ type?: string; text?: string }> }> }; const text = extractOutputText(body); if (!text) throw new IntelligenceProviderError("OpenAI returned no coaching output.", "INVALID_RESPONSE");
+  try { return { provider: "openai", model, requestId, output: schema.parse(JSON.parse(text)) }; } catch { throw new IntelligenceProviderError("OpenAI coaching output failed validation.", "INVALID_RESPONSE"); }
+}
+const obj=(properties:Record<string,unknown>)=>({type:"object",additionalProperties:false,properties,required:Object.keys(properties)});
+const confidenceJson={type:"string",enum:["HIGH","MEDIUM","LOW","INSUFFICIENT_DATA"]}; const evidenceJson=obj({kind:{type:"string",enum:["FACT","CALCULATION","HYPOTHESIS","INSUFFICIENT_EVIDENCE"]},statement:{type:"string"},source:{type:"string"}});
+const coachingJsonSchema=obj({answer:{type:"string"},evidence:{type:"array",maxItems:8,items:evidenceJson},hypotheses:{type:"array",maxItems:3,items:{type:"string"}},recommendations:{type:"array",maxItems:3,items:obj({action:{type:"string"},why:{type:"string"},confidence:confidenceJson})},missingData:{type:"array",maxItems:4,items:{type:"string"}},confidence:confidenceJson,continueCurrentStrategy:{type:"boolean"}});
+const weeklyJsonSchema=obj({weekInOneSentence:{type:"string"},biggestWin:{type:["string","null"]},biggestConcern:{type:["string","null"]},working:{type:"array",maxItems:3,items:{type:"string"}},possibleLimiters:{type:"array",maxItems:3,items:{type:"string"}},tradeOffs:{type:"array",maxItems:3,items:{type:"string"}},continue:{type:"array",maxItems:3,items:{type:"string"}},change:{type:"array",maxItems:3,items:{type:"string"}},priorities:{type:"array",maxItems:3,items:obj({action:{type:"string"},why:{type:"string"},confidence:confidenceJson})},missingInformation:{type:"array",maxItems:4,items:{type:"string"}},confidence:confidenceJson});
+export const generateAskLifeOs = (brief: unknown) => generateCoaching<CoachingAnswer>("ask_life_os", brief, coachingAnswerSchema, "life_os_answer_v1");
+export const generateWeeklyCoaching = (brief: unknown) => generateCoaching<WeeklyCoaching>("weekly_coaching", brief, weeklyCoachingSchema, "life_os_weekly_v1");
 function numericMilestones(baseline: number | null, target: number | null, unit: string | null, direction: string) { if (baseline == null || target == null || baseline === target) return []; const steps = Math.abs(target - baseline) >= 8 ? 3 : 2; return Array.from({ length: steps }, (_, index) => { const value = Math.round((baseline + (target - baseline) * (index + 1) / (steps + 1)) * 100) / 100; return { title: `${direction === "DECREASE" ? "Reach" : "Build to"} ${value}${unit ? ` ${unit}` : ""}`, targetValue: value, rationale: "Intermediate numeric checkpoint." }; }); }
