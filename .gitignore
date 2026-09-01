@@ -6,3 +6,4 @@ node_modules
 .postgres-data
 coverage
 *.tsbuildinfo
+.env*
