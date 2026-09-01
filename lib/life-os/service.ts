@@ -4,6 +4,7 @@ import { prisma } from "@/lib/db/prisma";
 import { addDays, localDate, weekStart } from "./date";
 import { calculateScore, type ScorePart } from "./score";
 import { recalculatePathway } from "@/lib/intelligence/service";
+import { getDeterministicWeeklyIntelligence } from "@/lib/intelligence/service";
 
 const areas = [
   ["health", "Health", 25], ["work", "pH7 / Work", 20], ["wealth", "Wealth", 12], ["relationships", "Relationships", 12], ["social", "Friends / Social", 8], ["development", "Personal Development", 7], ["environment", "Home / Environment", 6], ["adventure", "Adventure / Travel", 4], ["contribution", "Mentoring / Contribution", 3], ["fun", "Fun", 3]
@@ -169,7 +170,9 @@ export async function getWeeklyReview(userId: string) {
   scores.forEach((score) => score.components.forEach((part) => components.set(part.label, [...(components.get(part.label) ?? []), part.contribution])));
   const ranked = [...components.entries()].map(([label, values]) => ({ label, value: average(values) })).sort((a, b) => b.value - a.value);
   const neglected = (await prisma.lifeArea.findMany({ where: { userId, active: true } })).filter((area) => !ranked.some((item) => item.label === area.name)).map((area) => ({ area: area.name, reason: "No scored leading action this week." }));
-  const data = { userId, weekStart: start, weekEnd: end, overallScore: averageScore, strongestArea: ranked[0]?.label, weakestArea: ranked.at(-1)?.label, improved: [], deteriorated: [], neglected, recommendations: neglected.length ? [{ title: `Schedule one ${neglected[0].area} action first.`, severity: "WATCH" }] : [{ title: "Keep the core loop stable next week.", severity: "INFO" }], snapshot: { scores: scores.map((item) => ({ date: item.localDate, score: item.score })) } };
+  const intelligence = await getDeterministicWeeklyIntelligence(userId);
+  const combinedNeglected = [...new Map([...neglected, ...intelligence.neglected.map((area) => ({ area, reason: "No linked behaviour is configured." }))].map((item) => [item.area, item])).values()];
+  const data = { userId, weekStart: start, weekEnd: end, overallScore: averageScore, strongestArea: ranked[0]?.label, weakestArea: ranked.at(-1)?.label, improved: intelligence.improved, deteriorated: intelligence.deteriorated, neglected: combinedNeglected, recommendations: [{ title: intelligence.recommendation.title, severity: intelligence.deteriorated.length || combinedNeglected.length ? "WATCH" : "INFO", detail: intelligence.recommendation.detail }], snapshot: { scores: scores.map((item) => ({ date: item.localDate, score: item.score })), intelligence } };
   return prisma.weeklyReview.upsert({ where: { userId_weekStart: { userId, weekStart: start } }, update: data, create: data });
 }
 

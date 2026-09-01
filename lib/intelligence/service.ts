@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db/prisma";
 import { localDate } from "@/lib/life-os/date";
 import { intelligenceProvider, IntelligenceProviderError, type PathwayProposal } from "./provider";
 import { estimateTrajectory, milestoneComplete } from "./trajectory";
+import { classifyInput, confidenceFor, detectTradeOff, trend, weeklyRecommendation } from "./analysis";
 
 const confidence = (value: string) => value as IntelligenceConfidence;
 const trajectory = (value: string) => value as TrajectoryStatus;
@@ -67,6 +68,29 @@ async function refreshPathwayIntelligence(userId: string, pathwayId: string, est
 export async function getIntelligenceView(userId: string) {
   const [pathways, proposals, insights, recommendations] = await Promise.all([prisma.goalPathway.findMany({ where: { userId }, include: { objective: { include: { lifeArea: true } }, milestones: { orderBy: { sequence: "asc" } }, metrics: { where: { active: true }, include: { metricDefinition: true } }, actions: { where: { active: true }, orderBy: { priority: "asc" } }, trajectorySnapshots: { orderBy: { localDate: "desc" }, take: 1 } }, orderBy: { updatedAt: "desc" } }), prisma.aIProposal.findMany({ where: { userId, status: "PENDING" }, include: { pathway: true }, orderBy: { generatedAt: "desc" } }), prisma.insight.findMany({ where: { userId }, orderBy: { createdAt: "desc" }, take: 8 }), prisma.recommendation.findMany({ where: { userId, active: true }, orderBy: { updatedAt: "desc" }, take: 6 })]);
   return { pathways, proposals, insights, recommendations };
+}
+
+export async function getArchitectureView(userId: string) {
+  const [areas, metrics, entries, habits, pathways, tasks] = await Promise.all([
+    prisma.lifeArea.findMany({ where: { userId, active: true }, include: { objectives: { where: { active: true } } }, orderBy: { sortOrder: "asc" } }),
+    prisma.metricDefinition.findMany({ where: { userId, active: true }, orderBy: { name: "asc" } }),
+    prisma.metricEntry.findMany({ where: { userId, localDate: { gte: new Date(Date.now() - 30 * 86_400_000) } } }),
+    prisma.habit.findMany({ where: { userId, active: true }, include: { objective: true } }),
+    prisma.goalPathway.findMany({ where: { userId }, include: { metrics: true, milestones: { orderBy: { sequence: "asc" } } } }),
+    prisma.task.findMany({ where: { userId, active: true, objectiveId: { not: null } } })
+  ]);
+  const inputValue = metrics.map((metric) => { const linked = pathways.some((pathway) => pathway.status === "ACTIVE" && pathway.metrics.some((binding) => binding.metricDefinitionId === metric.id && binding.active)); const logged = entries.filter((entry) => entry.metricDefinitionId === metric.id).length; const value = classifyInput({ pathwayLinked: linked, scoreRelevant: metric.useInScore, driftRelevant: metric.useInDrift, loggedCount: logged, frequency: metric.frequency }); return { metric, value, logged, linked, message: value === "LOW_VALUE" ? "Logged daily but it currently influences no active pathway, score, or drift rule." : value === "UNCONNECTED" ? "Not connected to an active pathway or current calculation." : value === "REQUIRED" ? "Directly measures an active pathway." : "Supports an existing score or drift calculation." }; });
+  const numeric = (name: string) => metrics.find((metric) => metric.name.toLowerCase().includes(name))?.id;
+  const points = (id?: string) => id ? entries.filter((entry) => entry.metricDefinitionId === id && entry.valueNumber != null).map((entry) => ({ date: entry.localDate, value: entry.valueNumber! })) : [];
+  const tradeOff = detectTradeOff({ work: points(numeric("focus")), sleep: points(numeric("sleep")), relationships: [] });
+  const insights = [...inputValue.filter((item) => item.value === "LOW_VALUE" || item.value === "UNCONNECTED").map((item) => ({ title: `${item.metric.name}: ${item.value.replace("_", " ")}`, explanation: item.message, confidence: item.logged >= 5 ? "MEDIUM" : "LOW" })), ...(tradeOff ? [tradeOff] : [])];
+  return { areas, metrics: inputValue, habits, pathways, tasks, insights };
+}
+
+export async function getDeterministicWeeklyIntelligence(userId: string) {
+  const architecture = await getArchitectureView(userId); const improved:string[]=[]; const deteriorated:string[]=[];
+  for (const item of architecture.metrics) { const entries=await prisma.metricEntry.findMany({ where:{userId,metricDefinitionId:item.metric.id,valueNumber:{not:null}},orderBy:{localDate:"asc"},take:14 }); const signal=trend(entries.map((entry)=>({date:entry.localDate,value:entry.valueNumber!}))); if (!signal || signal.confidence === "INSUFFICIENT_DATA") continue; if (signal.direction === "UP") improved.push(item.metric.name); if (signal.direction === "DOWN") deteriorated.push(item.metric.name); }
+  const neglected=architecture.areas.filter((area)=>!architecture.habits.some((habit)=>habit.lifeAreaId===area.id)).map((area)=>area.name); const recommendation=weeklyRecommendation({improved,deteriorated,neglected}); return { improved, deteriorated, neglected, recommendation, confidence: confidenceFor([]) };
 }
 
 function validateProposal(proposal: PathwayProposal, input: { baselineValue?: number; targetValue?: number; direction?: string; unit?: string }) {
