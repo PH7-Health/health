@@ -3,6 +3,7 @@ import { CompletionState, LifeStatus, TaskPriority } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
 import { addDays, localDate, weekStart } from "./date";
 import { calculateScore, type ScorePart } from "./score";
+import { recalculatePathway } from "@/lib/intelligence/service";
 
 const areas = [
   ["health", "Health", 25], ["work", "pH7 / Work", 20], ["wealth", "Wealth", 12], ["relationships", "Relationships", 12], ["social", "Friends / Social", 8], ["development", "Personal Development", 7], ["environment", "Home / Environment", 6], ["adventure", "Adventure / Travel", 4], ["contribution", "Mentoring / Contribution", 3], ["fun", "Fun", 3]
@@ -40,13 +41,14 @@ export async function ensureLifeOsSeed(userId: string) {
   await prisma.notificationPreference.createMany({ data: [{ userId, channel: "email", eventType: "drift", enabled: true, minSeverity: "WATCH" }, { userId, channel: "email", eventType: "weekly_review", enabled: true, minSeverity: "INFO" }] });
 }
 
-export async function getTodayView(userId: string) {
+export async function getTodayView(userId: string, requestedDate?: Date) {
   await ensureLifeOsSeed(userId);
-  const date = localDate();
-  const [areas, objectives, metrics, entries, habits, habitCompletions, supplements, supplementLogs, tasks, taskCompletions, checkIn] = await Promise.all([
+  const date = requestedDate ?? localDate();
+  const [areas, objectives, metrics, scoreMetrics, entries, habits, habitCompletions, supplements, supplementLogs, tasks, taskCompletions, checkIn] = await Promise.all([
     prisma.lifeArea.findMany({ where: { userId, active: true }, orderBy: { sortOrder: "asc" } }),
     prisma.objective.findMany({ where: { userId, active: true }, include: { keyResults: true } }),
     prisma.metricDefinition.findMany({ where: { userId, active: true, showInCheckIn: true }, orderBy: { name: "asc" } }),
+    prisma.metricDefinition.findMany({ where: { userId, active: true, useInScore: true }, orderBy: { name: "asc" } }),
     prisma.metricEntry.findMany({ where: { userId, localDate: date } }),
     prisma.habit.findMany({ where: { userId, active: true, showToday: true }, include: { lifeArea: true, schedules: true }, orderBy: { name: "asc" } }),
     prisma.habitCompletion.findMany({ where: { userId, localDate: date } }),
@@ -59,12 +61,15 @@ export async function getTodayView(userId: string) {
   const scheduledHabits = habits.filter((habit) => isScheduled(habit.schedules, date));
   const scheduledSupplements = supplements.filter((supplement) => isScheduled(supplement.schedules, date));
   const scheduledTasks = tasks.filter((task) => isScheduled(task.recurrenceRule ? [{ daysOfWeek: task.recurrenceRule.daysOfWeek }] : [], date));
-  const score = await recalculateScore(userId, date, areas, { habits: scheduledHabits, habitCompletions, supplements: scheduledSupplements, supplementLogs, tasks: scheduledTasks, taskCompletions });
-  const alerts = await evaluateDrift(userId, date);
-  return { date, areas, objectives, metrics, entries, habits: scheduledHabits, habitCompletions, supplements: scheduledSupplements, supplementLogs, tasks: scheduledTasks, taskCompletions, checkIn, ...score, alerts };
+  const isToday = date.getTime() === localDate().getTime();
+  const fallback = isToday ? await recalculateScore(userId, date, areas, { habits: scheduledHabits, habitCompletions, supplements: scheduledSupplements, supplementLogs, tasks: scheduledTasks, taskCompletions, scoreMetrics, entries }) : await historicalScore(userId, date);
+  const alerts = isToday ? await evaluateDrift(userId, date) : await prisma.alertEvent.findMany({ where: { userId, localDate: date, resolvedAt: null } });
+  return { date, isToday, areas, objectives, metrics, scoreMetrics, entries, habits: scheduledHabits, habitCompletions, supplements: scheduledSupplements, supplementLogs, tasks: scheduledTasks, taskCompletions, checkIn, ...fallback, alerts };
 }
 
-type ScoreInputs = { habits: Array<{ id: string; affectsScore: boolean; lifeAreaId: string; lifeArea: { name: string } }>; habitCompletions: Array<{ habitId: string; state: CompletionState }>; supplements: Array<{ id: string }>; supplementLogs: Array<{ supplementId: string; state: CompletionState }>; tasks: Array<{ id: string; scoreRelevant: boolean; lifeAreaId: string | null }>; taskCompletions: Array<{ taskId: string; state: CompletionState }> };
+async function historicalScore(userId: string, date: Date) { const score = await prisma.dailyScore.findUnique({ where: { userId_localDate: { userId, localDate: date } } }); if (!score) return { score: 0, status: "OFF_TRACK" as LifeStatus, summary: "No recorded score for this day.", parts: [] }; return { score: score.score, status: score.status, summary: score.summary, parts: await prisma.dailyScoreComponent.findMany({ where: { dailyScoreId: score.id }, select: { label: true, expected: true, completed: true, weight: true, contribution: true, details: true } }) }; }
+
+type ScoreInputs = { habits: Array<{ id: string; affectsScore: boolean; lifeAreaId: string; lifeArea: { name: string } }>; habitCompletions: Array<{ habitId: string; state: CompletionState }>; supplements: Array<{ id: string }>; supplementLogs: Array<{ supplementId: string; state: CompletionState }>; tasks: Array<{ id: string; scoreRelevant: boolean; lifeAreaId: string | null }>; taskCompletions: Array<{ taskId: string; state: CompletionState }>; scoreMetrics: Array<{ id:string; name:string; defaultTarget:number|null; targetMin:number|null; targetMax:number|null; targetDirection:string; valueType:string }>; entries:Array<{metricDefinitionId:string;valueNumber:number|null;valueBoolean:boolean|null}> };
 
 async function recalculateScore(userId: string, date: Date, areas: Array<{ id: string; name: string; key: string; weight: number }>, state: ScoreInputs) {
   const grouped = new Map(areas.map((area) => [area.id, { label: area.name, expected: 0, completed: 0, weight: area.weight }]));
@@ -74,13 +79,39 @@ async function recalculateScore(userId: string, date: Date, areas: Array<{ id: s
   for (const supplement of state.supplements) add(healthArea, state.supplementLogs.some((item) => item.supplementId === supplement.id && item.state === "COMPLETED"));
   for (const task of state.tasks.filter((task) => task.scoreRelevant)) add(task.lifeAreaId ?? areas.find((area) => area.key === "work")?.id, state.taskCompletions.some((item) => item.taskId === task.id && item.state === "COMPLETED"));
   const parts: ScorePart[] = [...grouped.values()].filter((part) => part.expected > 0 && part.weight > 0);
+  const metricDetails = new Map<string, ReturnType<typeof metricEvaluation>>();
+  for (const metric of state.scoreMetrics) {
+    const evaluation = metricEvaluation(metric, state.entries.find((item) => item.metricDefinitionId === metric.id));
+    if (!evaluation) continue;
+    const label = `Metric · ${metric.name}`;
+    metricDetails.set(label, evaluation);
+    parts.push({ label, expected: 100, completed: Math.round(evaluation.ratio * 100), weight: Math.max(1, areas.find((area) => area.key === "health")?.weight ?? 1) });
+  }
   const result = calculateScore(parts);
   const summary = result.score >= 82 ? "The core loop is holding." : result.score >= 68 ? "A few deliberate actions will steady the day." : "Protect one recovery action and one meaningful commitment.";
   const status = result.status as LifeStatus;
   const dailyScore = await prisma.dailyScore.upsert({ where: { userId_localDate: { userId, localDate: date } }, update: { score: result.score, status, summary, snapshot: result }, create: { userId, localDate: date, score: result.score, status, summary, snapshot: result } });
   await prisma.dailyScoreComponent.deleteMany({ where: { dailyScoreId: dailyScore.id } });
-  if (result.parts.length) await prisma.dailyScoreComponent.createMany({ data: result.parts.map((part) => ({ dailyScoreId: dailyScore.id, ...part })) });
-  return { ...result, summary };
+  const explainedParts = result.parts.map((part) => ({ ...part, details: metricDetails.get(part.label) ?? null }));
+  if (explainedParts.length) await prisma.dailyScoreComponent.createMany({ data: explainedParts.map((part) => ({ dailyScoreId: dailyScore.id, ...part, details: part.details ?? undefined })) });
+  return { ...result, parts: explainedParts, summary };
+}
+
+function metricEvaluation(metric: ScoreInputs["scoreMetrics"][number], entry: ScoreInputs["entries"][number] | undefined) {
+  if (!entry) return null;
+  if (metric.valueType === "BOOLEAN") return { ratio: entry.valueBoolean ? 1 : 0, target: "Complete", actual: entry.valueBoolean ? "Complete" : "Not completed", reason: entry.valueBoolean ? "Boolean target completed." : "Boolean target not completed." };
+  const value = entry.valueNumber;
+  if (value == null) return null;
+  const display = (number: number) => String(Number(number.toFixed(2)));
+  if (metric.targetMin != null && metric.targetMax != null) {
+    const ratio = value >= metric.targetMin && value <= metric.targetMax ? 1 : value < metric.targetMin ? Math.max(0, value / metric.targetMin) : Math.max(0, metric.targetMax / value);
+    return { ratio, target: `${display(metric.targetMin)}–${display(metric.targetMax)}`, actual: display(value), reason: value >= metric.targetMin && value <= metric.targetMax ? "Within the configured target range." : value < metric.targetMin ? "Below the configured minimum." : "Above the configured maximum." };
+  }
+  const target = metric.defaultTarget ?? metric.targetMin ?? metric.targetMax;
+  if (!target) return null;
+  const decrease = metric.targetDirection === "DECREASE" || metric.targetMax != null;
+  const ratio = decrease ? Math.min(1, target / Math.max(value, 0.0001)) : Math.min(1, value / target);
+  return { ratio, target: `${decrease ? "≤" : "≥"} ${display(target)}`, actual: display(value), reason: ratio === 1 ? "Configured target reached." : decrease ? "Above the configured maximum." : "Below the configured minimum." };
 }
 
 export async function evaluateDrift(userId: string, date = localDate()) {
@@ -120,6 +151,8 @@ export async function saveCheckIn(userId: string, fields: Record<string, FormDat
   }));
   await prisma.dailyCheckIn.upsert({ where: { userId_localDate: { userId, localDate: date } }, update: { reflection: String(fields.reflection ?? "").trim() || null, completedAt: new Date() }, create: { userId, localDate: date, timezone: "Europe/Lisbon", reflection: String(fields.reflection ?? "").trim() || null, completedAt: new Date() } });
   await getTodayView(userId);
+  const pathways = await prisma.goalPathway.findMany({ where: { userId, status: "ACTIVE" }, select: { id: true } });
+  await Promise.all(pathways.map((pathway) => recalculatePathway(userId, pathway.id)));
 }
 
 export async function getDashboardView(userId: string) {

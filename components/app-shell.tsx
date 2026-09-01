@@ -4,7 +4,7 @@ import Link from "next/link";
 import { signOut } from "next-auth/react";
 import { usePathname } from "next/navigation";
 
-const links = [["/today", "Today"], ["/check-in", "Check-in"], ["/goals", "Goals"], ["/dashboard", "Dashboard"], ["/weekly-review", "Weekly review"], ["/settings", "Settings"]] as const;
+const links = [["/today", "Today"], ["/check-in", "Check-in"], ["/intelligence", "Pathways"], ["/goals", "Goals"], ["/dashboard", "Dashboard"], ["/weekly-review", "Weekly review"], ["/settings", "Settings"]] as const;
 
 export function AppShell({ children, email }: { children: React.ReactNode; email: string }) {
   const pathname = usePathname();
