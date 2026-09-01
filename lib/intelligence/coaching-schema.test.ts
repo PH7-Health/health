@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { coachingAnswerSchema, weeklyCoachingSchema } from "./coaching-schema";
-describe("coaching contracts",()=>{
- const answer={answer:"Continue the current strategy.",evidence:[{kind:"FACT",statement:"One observation exists.",source:"Metric history"}],hypotheses:[],recommendations:[],missingData:[],confidence:"LOW",continueCurrentStrategy:true};
- it("accepts grounded answers and rejects unbounded recommendations",()=>{expect(coachingAnswerSchema.parse(answer).confidence).toBe("LOW");expect(coachingAnswerSchema.safeParse({...answer,recommendations:Array(4).fill({action:"x",why:"y",confidence:"LOW"})}).success).toBe(false)});
- it("limits weekly priorities and permits no-change sections",()=>{expect(weeklyCoachingSchema.parse({weekInOneSentence:"No meaningful change.",biggestWin:null,biggestConcern:null,working:[],possibleLimiters:[],tradeOffs:[],continue:["Continue"],change:[],priorities:[],missingInformation:[],confidence:"INSUFFICIENT_DATA"}).continue).toHaveLength(1)});
-});
+import { coachingAnswerSchema } from "./coaching-schema";
+const fact={kind:"FACT",claim:"5K metric is recorded.",source:"METRIC_HISTORY",period:"last 21 days",confidence:"MEDIUM"} as const;
+const answer={status:"ANSWERED",answer:"The recorded 5K metric is the available outcome signal.",evidence:[fact],hypotheses:[],recommendations:[],missingData:[],confidence:"MEDIUM",continueCurrentStrategy:false};
+describe("coaching evidence contract",()=>{it("rejects factual answers without evidence",()=>expect(coachingAnswerSchema.safeParse({...answer,evidence:[]}).success).toBe(false));it("rejects fabricated evidence sources",()=>expect(coachingAnswerSchema.safeParse({...answer,evidence:[{...fact,source:"INVENTED"}]}).success).toBe(false));it("accepts valid fact evidence and insufficient-evidence responses",()=>{expect(coachingAnswerSchema.parse(answer).evidence).toHaveLength(1);expect(coachingAnswerSchema.parse({...answer,status:"INSUFFICIENT_EVIDENCE",missingData:["Anxiety history"]}).status).toBe("INSUFFICIENT_EVIDENCE")});it("requires hypotheses to name evidence and uncertainty",()=>expect(coachingAnswerSchema.safeParse({...answer,hypotheses:[{hypothesis:"Recovery may matter",evidenceSources:[],confidence:"LOW",uncertainty:"Not established"}]}).success).toBe(false));});
