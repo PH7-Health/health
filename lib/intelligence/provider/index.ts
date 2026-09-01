@@ -1,5 +1,6 @@
 import { z, type ZodIssue } from "zod";
 import { coachingAnswerSchema, weeklyCoachingSchema, type CoachingAnswer, type WeeklyCoaching } from "../coaching-schema";
+import { alignmentTurnSchema, type AlignmentTurn } from "../alignment-contract";
 
 export const PATHWAY_SCHEMA_VERSION = "v3";
 const confidenceValues = ["HIGH", "MEDIUM", "LOW", "INSUFFICIENT_DATA"] as const;
@@ -173,6 +174,17 @@ const coachingJsonSchema=obj({status:{type:"string",enum:["ANSWERED","INSUFFICIE
 const weeklyJsonSchema=obj({weekInOneSentence:{type:"string"},biggestWin:{type:["string","null"]},biggestConcern:{type:["string","null"]},working:{type:"array",maxItems:3,items:{type:"string"}},possibleLimiters:{type:"array",maxItems:3,items:{type:"string"}},tradeOffs:{type:"array",maxItems:3,items:{type:"string"}},continue:{type:"array",maxItems:3,items:{type:"string"}},change:{type:"array",maxItems:3,items:{type:"string"}},priorities:{type:"array",maxItems:3,items:obj({action:{type:"string"},why:{type:"string"},confidence:confidenceJson})},missingInformation:{type:"array",maxItems:4,items:{type:"string"}},confidence:confidenceJson});
 export const generateAskLifeOs = (brief: unknown) => generateCoaching<CoachingAnswer>("ask_life_os", brief, coachingAnswerSchema, "life_os_answer_v1");
 export const generateWeeklyCoaching = (brief: unknown) => generateCoaching<WeeklyCoaching>("weekly_coaching", brief, weeklyCoachingSchema, "life_os_weekly_v1");
+
+export async function generateAlignmentTurn(context: unknown): Promise<{ provider: string; model: string; requestId: string | null; output: AlignmentTurn }> {
+  const apiKey = process.env.OPENAI_API_KEY; const model = process.env.OPENAI_MODEL;
+  if (!apiKey || !model) throw new IntelligenceProviderError("OpenAI is not configured for this environment.", "MISSING_CONFIGURATION");
+  const response = await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" }, body: JSON.stringify({ model, instructions: "You are a cautious Life OS alignment strategist. Use only the bounded context. Never invent facts, targets, or observed evidence. STATED assertions must come directly from the newest user message. INFERRED assertions require confidence, rationale, and evidence references. OBSERVED assertions may cite only supplied evidence references. Ask exactly one high-information next question; do not repeat known facts. Return only the required schema.", input: JSON.stringify(context), text: { format: { type: "json_schema", name: "life_os_alignment_turn_v1", strict: true, schema: alignmentJsonSchema } } }) });
+  const requestId = response.headers.get("x-request-id"); if (!response.ok) throw new IntelligenceProviderError(`OpenAI alignment request failed (${response.status}).`, "REQUEST_FAILED");
+  const body = await response.json() as { output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> }; const text = extractOutputText(body); if (!text) throw new IntelligenceProviderError("OpenAI returned no alignment output.", "INVALID_RESPONSE");
+  try { return { provider: "openai", model, requestId, output: alignmentTurnSchema.parse(JSON.parse(text)) }; } catch { throw new IntelligenceProviderError("OpenAI alignment output failed validation.", "INVALID_RESPONSE"); }
+}
+const alignmentAssertionJson=obj({category:{type:"string",enum:["CURRENT","DESIRED","MOTIVATION","PRIORITY","CONSTRAINT","ANTI_GOAL","UNCERTAINTY","TENSION"]},content:{type:"string"},source:{type:"string",enum:["STATED","INFERRED","OBSERVED"]},confidence:confidenceJson,rationale:{type:"string"},evidenceReferences:{type:"array",items:{type:"string"}}});
+const alignmentJsonSchema=obj({assertions:{type:"array",maxItems:16,items:alignmentAssertionJson},nextQuestion:{type:"string"},questionRationale:{type:"string"}});
 
 type CoachingSource = "PATHWAY" | "MILESTONE" | "METRIC_HISTORY" | "TODAY" | "TRAJECTORY" | "DRIFT" | "INSIGHT" | "RECOMMENDATION";
 

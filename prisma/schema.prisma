@@ -115,6 +115,23 @@ enum InsightType {
   DATA_QUALITY
 }
 
+enum AlignmentSessionStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum AlignmentMessageRole {
+  USER
+  ASSISTANT
+  CORRECTION
+}
+
+enum AlignmentSource {
+  STATED
+  INFERRED
+  OBSERVED
+}
+
 model User {
   id                      String                   @id @default(cuid())
   email                   String                   @unique
@@ -148,23 +165,75 @@ model User {
   aiProposals             AIProposal[]
   aiExecutions            AIExecution[]
   pathwayMetrics          PathwayMetric[]
+  alignmentSessions       AlignmentSession[]
   createdAt               DateTime                 @default(now())
   updatedAt               DateTime                 @updatedAt
 }
 
+model AlignmentSession {
+  id         String                   @id @default(cuid())
+  userId     String
+  lifeAreaId String
+  status     AlignmentSessionStatus   @default(ACTIVE)
+  createdAt  DateTime                 @default(now())
+  updatedAt  DateTime                 @updatedAt
+  user       User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lifeArea   LifeArea                 @relation(fields: [lifeAreaId], references: [id], onDelete: Cascade)
+  messages   AlignmentMessage[]
+  assertions AlignmentUnderstanding[]
+
+  @@index([userId, lifeAreaId, status])
+}
+
+model AlignmentMessage {
+  id            String               @id @default(cuid())
+  sessionId     String
+  role          AlignmentMessageRole
+  content       String
+  provider      String?
+  model         String?
+  schemaVersion String?
+  validation    String?
+  clientTurnId  String?
+  createdAt     DateTime             @default(now())
+  session       AlignmentSession     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, createdAt])
+  @@unique([sessionId, clientTurnId])
+}
+
+model AlignmentUnderstanding {
+  id            String                 @id @default(cuid())
+  sessionId     String
+  category      String
+  content       String
+  source        AlignmentSource
+  confidence    IntelligenceConfidence @default(INSUFFICIENT_DATA)
+  rationale     String?
+  evidence      Json?
+  active        Boolean                @default(true)
+  correctedById String?
+  createdAt     DateTime               @default(now())
+  updatedAt     DateTime               @updatedAt
+  session       AlignmentSession       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, category, active])
+}
+
 model LifeArea {
-  id          String      @id @default(cuid())
-  userId      String
-  key         String
-  name        String
-  description String?
-  weight      Int         @default(0)
-  sortOrder   Int         @default(0)
-  active      Boolean     @default(true)
-  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  objectives  Objective[]
-  habits      Habit[]
-  tasks       Task[]
+  id                String             @id @default(cuid())
+  userId            String
+  key               String
+  name              String
+  description       String?
+  weight            Int                @default(0)
+  sortOrder         Int                @default(0)
+  active            Boolean            @default(true)
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  objectives        Objective[]
+  habits            Habit[]
+  tasks             Task[]
+  alignmentSessions AlignmentSession[]
 
   @@unique([userId, key])
   @@index([userId, active, sortOrder])
