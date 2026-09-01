@@ -34,9 +34,11 @@ class OpenAIProvider implements IntelligenceProvider {
     try {
       const response = await fetch("https://api.openai.com/v1/responses", { method: "POST", signal: controller.signal, headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" }, body: JSON.stringify({ model, instructions: "You are a cautious Life OS pathway planner. Reason semantically, but never calculate dates, velocities or score arithmetic. Reuse an existing metric only by its supplied id. Never claim certainty without data. Return only the requested schema.", input: JSON.stringify(input), text: { format: { type: "json_schema", ...schema } } }) });
       if (!response.ok) throw new IntelligenceProviderError(`OpenAI could not generate a pathway (${response.status}). Retry later.`, "REQUEST_FAILED");
-      const body = await response.json() as { output_text?: string };
-      if (!body.output_text) throw new IntelligenceProviderError("OpenAI returned no structured pathway.", "INVALID_RESPONSE");
-      const proposal = pathwayProposalSchema.safeParse(JSON.parse(body.output_text));
+      const body = await response.json() as { output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> };
+      // output_text is an SDK convenience field; raw Responses API payloads carry text in output content.
+      const outputText = body.output_text ?? body.output?.flatMap((item) => item.content ?? []).find((item) => item.type === "output_text")?.text;
+      if (!outputText) throw new IntelligenceProviderError("OpenAI returned no structured pathway.", "INVALID_RESPONSE");
+      const proposal = pathwayProposalSchema.safeParse(JSON.parse(outputText));
       if (!proposal.success) throw new IntelligenceProviderError("OpenAI returned a pathway that did not pass safety validation.", "INVALID_RESPONSE");
       return { provider: this.name, model, proposal: proposal.data };
     } catch (error) { if (error instanceof IntelligenceProviderError) throw error; throw new IntelligenceProviderError("OpenAI request failed. Retry later.", "REQUEST_FAILED"); } finally { clearTimeout(timer); }
