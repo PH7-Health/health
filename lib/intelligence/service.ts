@@ -1,7 +1,7 @@
 import { IntelligenceConfidence, MilestoneStatus, PathwayStatus, TrajectoryStatus } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
 import { localDate } from "@/lib/life-os/date";
-import { intelligenceProvider, IntelligenceProviderError, type PathwayProposal } from "./provider";
+import { intelligenceProvider, IntelligenceProviderError, PATHWAY_SCHEMA_VERSION, validatePathwaySemantics, type PathwayProposal, type ProviderInput } from "./provider";
 import { estimateTrajectory, milestoneComplete } from "./trajectory";
 import { classifyInput, confidenceFor, detectTradeOff, trend, weeklyRecommendation } from "./analysis";
 
@@ -13,16 +13,17 @@ export async function createPathwayProposal(userId: string, input: { objectiveId
   if (!objective) throw new Error("Objective not found");
   const direction = input.direction ?? "INCREASE";
   const availableMetrics = await prisma.metricDefinition.findMany({ where: { userId, active: true }, select: { id: true, name: true, unit: true, valueType: true, frequency: true } });
+  const providerInput: ProviderInput = { current: input.currentDescription, desired: input.desiredDescription, baseline: input.baselineValue ?? null, target: input.targetValue ?? null, unit: input.unit ?? null, direction, constraints: input.constraints ?? null, metrics: availableMetrics };
   let generated;
-  try { generated = await intelligenceProvider.generatePathway({ current: input.currentDescription, desired: input.desiredDescription, baseline: input.baselineValue ?? null, target: input.targetValue ?? null, unit: input.unit ?? null, direction, constraints: input.constraints ?? null, metrics: availableMetrics }); } catch (error) { if (error instanceof IntelligenceProviderError) throw error; throw new Error("Pathway generation failed safely. Please retry."); }
-  const result = validateProposal(generated.proposal, input);
+  try { generated = await intelligenceProvider.generatePathway(providerInput); } catch (error) { if (error instanceof IntelligenceProviderError) { await recordPathwayDiagnostic(userId, error); throw error; } throw new Error("Pathway generation failed safely. Please retry."); }
+  const result = validateProposal(generated.proposal, providerInput);
   const pathway = await prisma.goalPathway.upsert({ where: { objectiveId: objective.id }, update: { currentDescription: input.currentDescription, desiredDescription: input.desiredDescription, constraints: input.constraints || null, preferences: input.preferences || null, baselineValue: input.baselineValue ?? null, targetValue: input.targetValue ?? null, unit: input.unit || null, direction, desiredDate: input.desiredDate ? new Date(`${input.desiredDate}T12:00:00.000Z`) : null, status: PathwayStatus.DRAFT }, create: { userId, objectiveId: objective.id, currentDescription: input.currentDescription, desiredDescription: input.desiredDescription, constraints: input.constraints || null, preferences: input.preferences || null, baselineValue: input.baselineValue ?? null, targetValue: input.targetValue ?? null, unit: input.unit || null, direction, desiredDate: input.desiredDate ? new Date(`${input.desiredDate}T12:00:00.000Z`) : null } });
   await prisma.milestone.deleteMany({ where: { pathwayId: pathway.id, status: MilestoneStatus.PENDING } });
   await prisma.milestone.createMany({ data: result.milestones.map((milestone, index) => ({ pathwayId: pathway.id, sequence: index + 1, title: milestone.title, description: milestone.rationale, targetValue: milestone.targetValue, unit: input.unit || null, status: index === 0 ? MilestoneStatus.ACTIVE : MilestoneStatus.PENDING })) });
   await prisma.pathwayAction.deleteMany({ where: { pathwayId: pathway.id } });
   await prisma.pathwayAction.createMany({ data: result.pathwayActions.map((action, index) => ({ pathwayId: pathway.id, title: action.title, rationale: action.rationale, expectedImpact: action.expectedImpact, priority: objective.priority + index })) });
-  await prisma.aIExecution.create({ data: { userId, provider: generated.provider, model: generated.model, operation: "pathway_generation", schemaVersion: "v2", inputWindow: { ...input, metrics: availableMetrics }, output: result } });
-  return prisma.aIProposal.create({ data: { userId, pathwayId: pathway.id, type: "PATHWAY", title: `Proposed pathway: ${objective.title}`, rationale: result.rationale, payload: result, provider: generated.provider, model: generated.model, schemaVersion: "v2", confidence: result.confidence } });
+  await prisma.aIExecution.create({ data: { userId, provider: generated.provider, model: generated.model, operation: "pathway_generation", schemaVersion: PATHWAY_SCHEMA_VERSION, inputWindow: { ...input, metrics: availableMetrics }, output: result } });
+  return prisma.aIProposal.create({ data: { userId, pathwayId: pathway.id, type: "PATHWAY", title: `Proposed pathway: ${objective.title}`, rationale: result.rationale, payload: result, provider: generated.provider, model: generated.model, schemaVersion: PATHWAY_SCHEMA_VERSION, confidence: result.confidence } });
 }
 
 export async function resolveProposal(userId: string, proposalId: string, accept: boolean) {
@@ -93,13 +94,16 @@ export async function getDeterministicWeeklyIntelligence(userId: string) {
   const neglected=architecture.areas.filter((area)=>!architecture.habits.some((habit)=>habit.lifeAreaId===area.id)).map((area)=>area.name); const recommendation=weeklyRecommendation({improved,deteriorated,neglected}); return { improved, deteriorated, neglected, recommendation, confidence: confidenceFor([]) };
 }
 
-function validateProposal(proposal: PathwayProposal, input: { baselineValue?: number; targetValue?: number; direction?: string; unit?: string }) {
-  const numeric = proposal.milestones.filter((item) => item.targetValue != null).map((item) => item.targetValue!);
-  const baseline = input.baselineValue; const target = input.targetValue; const decreasing = input.direction === "DECREASE";
-  if (new Set(numeric).size !== numeric.length) throw new Error("The generated pathway had duplicate milestones. Please retry.");
-  if (baseline != null && target != null && numeric.some((value) => decreasing ? value >= baseline || value <= target : value <= baseline || value >= target)) throw new Error("The generated milestones did not sit between your baseline and target. Please retry.");
-  if (numeric.some((value, index) => index > 0 && (decreasing ? value >= numeric[index - 1] : value <= numeric[index - 1]))) throw new Error("The generated milestones were not ordered correctly. Please retry.");
+function validateProposal(proposal: PathwayProposal, input: ProviderInput) {
+  const issues = validatePathwaySemantics(proposal, input);
+  if (issues.length) throw new Error(`The generated pathway did not pass deterministic validation at ${issues[0].path}. Please retry.`);
   return proposal;
+}
+
+async function recordPathwayDiagnostic(userId: string, error: IntelligenceProviderError) {
+  if (!error.diagnostic) return;
+  // Persist only contract metadata, never the user narrative or raw model output.
+  await prisma.aIExecution.create({ data: { userId, provider: error.diagnostic.provider, model: error.diagnostic.model, operation: "pathway_generation_validation", schemaVersion: error.diagnostic.schemaVersion, inputWindow: { inputCaptured: false }, output: error.diagnostic } });
 }
 
 async function findOrCreateMetric(userId: string, metric: PathwayProposal["suggestedMetrics"][number]) {
