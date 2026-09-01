@@ -4,6 +4,7 @@ import { localDate } from "@/lib/life-os/date";
 import { intelligenceProvider, IntelligenceProviderError, PATHWAY_SCHEMA_VERSION, validatePathwaySemantics, type PathwayProposal, type ProviderInput } from "./provider";
 import { estimateTrajectory, milestoneComplete } from "./trajectory";
 import { classifyInput, confidenceFor, detectTradeOff, trend, weeklyRecommendation } from "./analysis";
+import { selectPrimaryMetric } from "./metric-compatibility";
 
 const confidence = (value: string) => value as IntelligenceConfidence;
 const trajectory = (value: string) => value as TrajectoryStatus;
@@ -12,12 +13,12 @@ export async function createPathwayProposal(userId: string, input: { objectiveId
   const objective = await prisma.objective.findFirst({ where: { id: input.objectiveId, userId } });
   if (!objective) throw new Error("Objective not found");
   const direction = input.direction ?? "INCREASE";
-  const availableMetrics = await prisma.metricDefinition.findMany({ where: { userId, active: true }, select: { id: true, name: true, unit: true, valueType: true, frequency: true } });
+  const availableMetrics = await prisma.metricDefinition.findMany({ where: { userId, active: true }, select: { id: true, name: true, unit: true, valueType: true, frequency: true, category: true, targetDirection: true } });
   const providerInput: ProviderInput = { current: input.currentDescription, desired: input.desiredDescription, baseline: input.baselineValue ?? null, target: input.targetValue ?? null, unit: input.unit ?? null, direction, constraints: input.constraints ?? null, metrics: availableMetrics };
   let generated;
   try { generated = await intelligenceProvider.generatePathway(providerInput); } catch (error) { if (error instanceof IntelligenceProviderError) { await recordPathwayDiagnostic(userId, error); throw error; } throw new Error("Pathway generation failed safely. Please retry."); }
-  const compatibleMetric = generated.proposal.suggestedMetrics.find((metric) => metric.direction === direction && (!input.unit || !metric.unit || metric.unit.toLowerCase() === input.unit.toLowerCase()));
-  const proposal = compatibleMetric ? { ...generated.proposal, suggestedMetrics: [compatibleMetric, ...generated.proposal.suggestedMetrics.filter((metric) => metric !== compatibleMetric)] } : generated.proposal;
+  const primaryMetric = selectPrimaryMetric({ desired: input.desiredDescription, unit: input.unit ?? null, direction }, availableMetrics.map((metric) => ({ ...metric, direction: metric.targetDirection })), generated.proposal.suggestedMetrics);
+  const proposal = { ...generated.proposal, suggestedMetrics: [primaryMetric, ...generated.proposal.suggestedMetrics.filter((metric) => metric.existingMetricId !== primaryMetric.existingMetricId || metric.name !== primaryMetric.name)] };
   const result = validateProposal(proposal, providerInput);
   const pathway = await prisma.goalPathway.upsert({ where: { objectiveId: objective.id }, update: { currentDescription: input.currentDescription, desiredDescription: input.desiredDescription, constraints: input.constraints || null, preferences: input.preferences || null, baselineValue: input.baselineValue ?? null, targetValue: input.targetValue ?? null, unit: input.unit || null, direction, desiredDate: input.desiredDate ? new Date(`${input.desiredDate}T12:00:00.000Z`) : null, status: PathwayStatus.DRAFT }, create: { userId, objectiveId: objective.id, currentDescription: input.currentDescription, desiredDescription: input.desiredDescription, constraints: input.constraints || null, preferences: input.preferences || null, baselineValue: input.baselineValue ?? null, targetValue: input.targetValue ?? null, unit: input.unit || null, direction, desiredDate: input.desiredDate ? new Date(`${input.desiredDate}T12:00:00.000Z`) : null } });
   await prisma.milestone.deleteMany({ where: { pathwayId: pathway.id, status: MilestoneStatus.PENDING } });
