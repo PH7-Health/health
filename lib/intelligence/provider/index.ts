@@ -156,7 +156,16 @@ async function generateCoaching<T>(operation: "ask_life_os" | "weekly_coaching",
   const response = await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" }, body: JSON.stringify({ model, instructions: `You are Life OS coaching intelligence. Use only the supplied evidence brief. Label uncertainty; never invent facts or causation. ${operation === "weekly_coaching" ? "Return at most three priorities and allow empty sections." : "Every data-derived claim must have a non-empty FACT or CALCULATION evidence entry citing only a supplied source. Hypotheses must be separate, include evidence sources and uncertainty. For unsupported questions use INSUFFICIENT_EVIDENCE with available evidence and missing data."}`, input: JSON.stringify(brief), text: { format: { type: "json_schema", name, strict: true, schema: operation === "ask_life_os" ? coachingJsonSchema : weeklyJsonSchema } } }) });
   const requestId = response.headers.get("x-request-id"); if (!response.ok) throw new IntelligenceProviderError(`OpenAI coaching request failed (${response.status}).`, "REQUEST_FAILED");
   const body = await response.json() as { output?: Array<{ content?: Array<{ type?: string; text?: string }> }> }; const text = extractOutputText(body); if (!text) throw new IntelligenceProviderError("OpenAI returned no coaching output.", "INVALID_RESPONSE");
-  try { return { provider: "openai", model, requestId, output: schema.parse(JSON.parse(text)) }; } catch { throw new IntelligenceProviderError("OpenAI coaching output failed validation.", "INVALID_RESPONSE"); }
+  try {
+    const output = schema.parse(JSON.parse(text));
+    if (operation === "ask_life_os" && !validateCoachingEvidenceSources(output as CoachingAnswer, brief)) {
+      throw new IntelligenceProviderError("OpenAI coaching output cited evidence unavailable in the supplied brief.", "INVALID_RESPONSE");
+    }
+    return { provider: "openai", model, requestId, output };
+  } catch (error) {
+    if (error instanceof IntelligenceProviderError) throw error;
+    throw new IntelligenceProviderError("OpenAI coaching output failed validation.", "INVALID_RESPONSE");
+  }
 }
 const obj=(properties:Record<string,unknown>)=>({type:"object",additionalProperties:false,properties,required:Object.keys(properties)});
 const confidenceJson={type:"string",enum:["HIGH","MEDIUM","LOW","INSUFFICIENT_DATA"]}; const evidenceSource={type:"string",enum:["PATHWAY","MILESTONE","METRIC_HISTORY","TODAY","TRAJECTORY","DRIFT","INSIGHT","RECOMMENDATION"]}; const evidenceJson=obj({kind:{type:"string",enum:["FACT","CALCULATION"]},claim:{type:"string"},source:evidenceSource,period:{type:"string"},confidence:confidenceJson});
@@ -164,4 +173,29 @@ const coachingJsonSchema=obj({status:{type:"string",enum:["ANSWERED","INSUFFICIE
 const weeklyJsonSchema=obj({weekInOneSentence:{type:"string"},biggestWin:{type:["string","null"]},biggestConcern:{type:["string","null"]},working:{type:"array",maxItems:3,items:{type:"string"}},possibleLimiters:{type:"array",maxItems:3,items:{type:"string"}},tradeOffs:{type:"array",maxItems:3,items:{type:"string"}},continue:{type:"array",maxItems:3,items:{type:"string"}},change:{type:"array",maxItems:3,items:{type:"string"}},priorities:{type:"array",maxItems:3,items:obj({action:{type:"string"},why:{type:"string"},confidence:confidenceJson})},missingInformation:{type:"array",maxItems:4,items:{type:"string"}},confidence:confidenceJson});
 export const generateAskLifeOs = (brief: unknown) => generateCoaching<CoachingAnswer>("ask_life_os", brief, coachingAnswerSchema, "life_os_answer_v1");
 export const generateWeeklyCoaching = (brief: unknown) => generateCoaching<WeeklyCoaching>("weekly_coaching", brief, weeklyCoachingSchema, "life_os_weekly_v1");
+
+type CoachingSource = "PATHWAY" | "MILESTONE" | "METRIC_HISTORY" | "TODAY" | "TRAJECTORY" | "DRIFT" | "INSIGHT" | "RECOMMENDATION";
+
+/** Reject citations that cannot be traced to data included in this request's bounded brief. */
+export function validateCoachingEvidenceSources(output: CoachingAnswer, input: unknown): boolean {
+  const request = input as { brief?: Record<string, unknown> };
+  const brief = request?.brief;
+  if (!brief) return false;
+  const pathways = Array.isArray(brief.pathways) ? brief.pathways as Array<Record<string, unknown>> : [];
+  const today = brief.today as Record<string, unknown> | undefined;
+  const available: Record<CoachingSource, boolean> = {
+    PATHWAY: pathways.length > 0,
+    MILESTONE: pathways.some((pathway) => Boolean(pathway.nextMilestone)),
+    METRIC_HISTORY: pathways.some((pathway) => Array.isArray(pathway.metrics) && pathway.metrics.some((metric: unknown) => {
+      const entries = (metric as Record<string, unknown>).entries;
+      return Array.isArray(entries) && entries.length > 0;
+    })),
+    TODAY: Boolean(today),
+    TRAJECTORY: pathways.some((pathway) => Boolean(pathway.trajectory)),
+    DRIFT: Array.isArray(today?.alerts) && today.alerts.length > 0,
+    INSIGHT: Array.isArray(brief.insights) && brief.insights.length > 0,
+    RECOMMENDATION: Array.isArray(brief.recommendations) && brief.recommendations.length > 0
+  };
+  return output.evidence.every((evidence) => available[evidence.source]) && output.hypotheses.every((hypothesis) => hypothesis.evidenceSources.every((source) => available[source]));
+}
 function numericMilestones(baseline: number | null, target: number | null, unit: string | null, direction: string) { if (baseline == null || target == null || baseline === target) return []; const steps = Math.abs(target - baseline) >= 8 ? 3 : 2; return Array.from({ length: steps }, (_, index) => { const value = Math.round((baseline + (target - baseline) * (index + 1) / (steps + 1)) * 100) / 100; return { title: `${direction === "DECREASE" ? "Reach" : "Build to"} ${value}${unit ? ` ${unit}` : ""}`, targetValue: value, rationale: "Intermediate numeric checkpoint." }; }); }
