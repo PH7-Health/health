@@ -10,6 +10,20 @@ export const alignmentAssertionSchema = z.object({ category: z.enum(["CURRENT", 
 export const alignmentTurnSchema = z.object({ assertions: z.array(alignmentAssertionSchema).max(16), nextQuestion: z.string().min(1).max(500), questionRationale: z.string().min(1).max(500) }).strict();
 export type AlignmentTurn = z.infer<typeof alignmentTurnSchema>;
 
+/** Canonicalise only harmless provider representations before strict validation. */
+export function normalizeAlignmentTurn(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const turn = structuredClone(value) as Record<string, unknown>;
+  if (Array.isArray(turn.assertions)) turn.assertions = turn.assertions.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+    const assertion = item as Record<string, unknown>;
+    if (assertion.rationale === null) delete assertion.rationale;
+    for (const key of ["category", "source", "confidence"] as const) if (typeof assertion[key] === "string") assertion[key] = assertion[key].trim().toUpperCase();
+    return assertion;
+  });
+  return turn;
+}
+
 /** Stated facts must appear in the user turn; observed facts must cite the bounded context. */
 export function validateAlignmentProvenance(turn: AlignmentTurn, userMessage: string, evidenceReferences: string[]) {
   const user = userMessage.toLowerCase();
