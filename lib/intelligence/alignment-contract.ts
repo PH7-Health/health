@@ -20,6 +20,14 @@ export function normalizeAlignmentTurn(value: unknown): unknown {
     if (assertion.rationale === null) delete assertion.rationale;
     for (const key of ["category", "source", "confidence"] as const) if (typeof assertion[key] === "string") assertion[key] = assertion[key].trim().toUpperCase();
     return assertion;
+  }).filter((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return true;
+    const assertion = item as Record<string, unknown>;
+    const references = Array.isArray(assertion.evidenceReferences) ? assertion.evidenceReferences : [];
+    // Do not persist unsupported provider claims; schema validation remains strict.
+    if (assertion.source === "INFERRED") return Boolean(assertion.rationale && references.length);
+    if (assertion.source === "OBSERVED") return references.length > 0;
+    return true;
   });
   return turn;
 }
