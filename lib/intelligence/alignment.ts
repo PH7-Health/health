@@ -44,15 +44,15 @@ export async function submitAlignmentTurn(userId: string, sessionId: string, con
   if (!session || session.status !== "ACTIVE") throw new Error("Alignment session not found.");
   const text = content.trim(); if (!text) throw new Error("Share what matters before continuing.");
   if (!clientTurnId.trim()) throw new Error("A turn identity is required.");
-  const existing = await prisma.alignmentMessage.findFirst({ where: { sessionId, clientTurnId } });
-  if (existing) return getAlignmentSession(userId, session.id);
-  try { await persistAlignmentMessage(session.id, "USER", text, { clientTurnId }); } catch { return getAlignmentSession(userId, session.id); }
+  let turn = await prisma.alignmentMessage.findFirst({ where: { sessionId, clientTurnId } });
+  if (turn?.turnStatus === "COMPLETED" || turn?.turnStatus === "PENDING") return getAlignmentSession(userId, session.id);
+  if (!turn) { try { turn = await persistAlignmentMessage(session.id, "USER", text, { clientTurnId, validation: "PENDING" }); await prisma.alignmentMessage.update({ where: { id: turn.id }, data: { turnStatus: "PENDING", turnError: null } }); } catch { return getAlignmentSession(userId, session.id); } } else { await prisma.alignmentMessage.update({ where: { id: turn.id }, data: { turnStatus: "PENDING", turnError: null } }); }
   const observed = await prisma.goalPathway.findMany({ where: { userId, objective: { lifeAreaId: session.lifeAreaId }, status: "ACTIVE" }, select: { currentDescription: true, desiredDescription: true, trajectoryStatus: true } });
   const evidenceReferences = observed.map((_, index) => `pathway:${index + 1}`);
   try {
     const generated = await generateAlignmentTurn({ lifeArea: { id: session.lifeArea.id, name: session.lifeArea.name }, userMessage: text, understanding: session.assertions, recentMessages: session.messages.slice(-8).map((message) => ({ role: message.role, content: message.content })), observed: observed.map((pathway, index) => ({ reference: evidenceReferences[index], ...pathway })) });
     if (!validateAlignmentProvenance(generated.output, text, evidenceReferences)) throw new Error("Alignment response could not be verified against your stated and observed context.");
-    await prisma.$transaction(async (tx) => { await persistAlignmentMessage(session.id, "ASSISTANT", generated.output.nextQuestion, { provider: generated.provider, model: generated.model, schemaVersion: "alignment-v1", validation: "PASS" }, tx); await updateAlignmentUnderstanding(session.id, generated.output.assertions as AlignmentAssertion[], tx); });
+    await prisma.$transaction(async (tx) => { await persistAlignmentMessage(session.id, "ASSISTANT", generated.output.nextQuestion, { provider: generated.provider, model: generated.model, schemaVersion: "alignment-v1", validation: "PASS" }, tx); await updateAlignmentUnderstanding(session.id, generated.output.assertions as AlignmentAssertion[], tx); await tx.alignmentMessage.update({ where: { id: turn!.id }, data: { turnStatus: "COMPLETED", validation: "PASS" } }); });
     return getAlignmentSession(userId, session.id);
-  } catch (error) { throw error instanceof Error ? error : new Error("Alignment could not respond safely. Please retry."); }
+  } catch (error) { const timedOut = error instanceof Error && error.message.includes("timed out"); await prisma.alignmentMessage.update({ where: { id: turn.id }, data: { turnStatus: timedOut ? "TIMED_OUT" : "FAILED", turnError: timedOut ? "Life OS took too long to respond. Your answer is saved." : "Life OS could not respond safely. Your answer is saved." } }); throw error instanceof Error ? error : new Error("Alignment could not respond safely. Please retry."); }
 }

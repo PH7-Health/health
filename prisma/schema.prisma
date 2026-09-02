@@ -132,6 +132,13 @@ enum AlignmentSource {
   OBSERVED
 }
 
+enum AlignmentTurnStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  TIMED_OUT
+}
+
 model User {
   id                      String                   @id @default(cuid())
   email                   String                   @unique
@@ -195,6 +202,8 @@ model AlignmentMessage {
   schemaVersion String?
   validation    String?
   clientTurnId  String?
+  turnStatus    AlignmentTurnStatus @default(COMPLETED)
+  turnError     String?
   createdAt     DateTime             @default(now())
   session       AlignmentSession     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
