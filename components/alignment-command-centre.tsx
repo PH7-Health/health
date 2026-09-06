@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AskLifeOs } from "@/components/ask-life-os";
 import { displayMetric } from "@/lib/intelligence/alignment-command";
 
@@ -14,6 +14,7 @@ const labels: Record<Exclude<Focus, null>, string> = { current: "Current", desir
 export function AlignmentCommandCentre({ command }: { command: Command }) {
   const { area, pathways, metrics } = command;
   const [focus, setFocus] = useState<Focus>(null);
+  useEffect(() => { const clear = (event: KeyboardEvent) => { if (event.key === "Escape") setFocus(null); }; window.addEventListener("keydown", clear); return () => window.removeEventListener("keydown", clear); }, []);
   const primary = pathways[0]; const pathway = primary?.pathway; const objective = primary?.objective;
   const next = pathway?.milestones.find((item) => item.status === "ACTIVE"); const snapshot = pathway?.trajectorySnapshots[0];
   const evidence = area.alignmentSessions[0]?.assertions ?? [];
