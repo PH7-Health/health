@@ -50,13 +50,13 @@ export async function getTodayView(userId: string, requestedDate?: Date) {
     prisma.objective.findMany({ where: { userId, active: true }, include: { keyResults: true } }),
     prisma.metricDefinition.findMany({ where: { userId, active: true, showInCheckIn: true }, orderBy: { name: "asc" } }),
     prisma.metricDefinition.findMany({ where: { userId, active: true, useInScore: true }, orderBy: { name: "asc" } }),
-    prisma.metricEntry.findMany({ where: { userId, localDate: date } }),
+    prisma.metricEntry.findMany({ where: { userId, localDate: date }, include: { metricDefinition: { select: { name:true,unit:true } } } }),
     prisma.habit.findMany({ where: { userId, active: true, showToday: true }, include: { lifeArea: true, schedules: true }, orderBy: { name: "asc" } }),
-    prisma.habitCompletion.findMany({ where: { userId, localDate: date } }),
+    prisma.habitCompletion.findMany({ where: { userId, localDate: date }, include: { habit: { select: { name:true } } } }),
     prisma.supplement.findMany({ where: { userId, active: true, OR: [{ startDate: null }, { startDate: { lte: date } }], AND: [{ OR: [{ endDate: null }, { endDate: { gte: date } }] }] }, include: { schedules: true }, orderBy: { name: "asc" } }),
-    prisma.supplementLog.findMany({ where: { userId, localDate: date } }),
+    prisma.supplementLog.findMany({ where: { userId, localDate: date }, include: { supplement: { select: { name:true } } } }),
     prisma.task.findMany({ where: { userId, active: true, showToday: true }, include: { lifeArea: true, recurrenceRule: true }, orderBy: { priority: "asc" } }),
-    prisma.taskCompletion.findMany({ where: { userId, localDate: date } }),
+    prisma.taskCompletion.findMany({ where: { userId, localDate: date }, include: { task: { select: { title:true } } } }),
     prisma.dailyCheckIn.findUnique({ where: { userId_localDate: { userId, localDate: date } } })
   ]);
   const scheduledHabits = habits.filter((habit) => isScheduled(habit.schedules, date));
@@ -68,7 +68,7 @@ export async function getTodayView(userId: string, requestedDate?: Date) {
   return { date, isToday, areas, objectives, metrics, scoreMetrics, entries, habits: scheduledHabits, habitCompletions, supplements: scheduledSupplements, supplementLogs, tasks: scheduledTasks, taskCompletions, checkIn, ...fallback, alerts };
 }
 
-async function historicalScore(userId: string, date: Date) { const score = await prisma.dailyScore.findUnique({ where: { userId_localDate: { userId, localDate: date } } }); if (!score) return { score: 0, status: "OFF_TRACK" as LifeStatus, summary: "No recorded score for this day.", parts: [] }; return { score: score.score, status: score.status, summary: score.summary, parts: await prisma.dailyScoreComponent.findMany({ where: { dailyScoreId: score.id }, select: { label: true, expected: true, completed: true, weight: true, contribution: true, details: true } }) }; }
+async function historicalScore(userId: string, date: Date) { const score = await prisma.dailyScore.findUnique({ where: { userId_localDate: { userId, localDate: date } } }); if (!score) return { hasScore: false, score: 0, status: "OFF_TRACK" as LifeStatus, summary: "No recorded score for this day.", parts: [] }; return { hasScore: true, score: score.score, status: score.status, summary: score.summary, parts: await prisma.dailyScoreComponent.findMany({ where: { dailyScoreId: score.id }, select: { label: true, expected: true, completed: true, weight: true, contribution: true, details: true } }) }; }
 
 type ScoreInputs = { habits: Array<{ id: string; affectsScore: boolean; lifeAreaId: string; lifeArea: { name: string } }>; habitCompletions: Array<{ habitId: string; state: CompletionState }>; supplements: Array<{ id: string }>; supplementLogs: Array<{ supplementId: string; state: CompletionState }>; tasks: Array<{ id: string; scoreRelevant: boolean; lifeAreaId: string | null }>; taskCompletions: Array<{ taskId: string; state: CompletionState }>; scoreMetrics: Array<{ id:string; name:string; defaultTarget:number|null; targetMin:number|null; targetMax:number|null; targetDirection:string; valueType:string }>; entries:Array<{metricDefinitionId:string;valueNumber:number|null;valueBoolean:boolean|null}> };
 
@@ -95,7 +95,7 @@ async function recalculateScore(userId: string, date: Date, areas: Array<{ id: s
   await prisma.dailyScoreComponent.deleteMany({ where: { dailyScoreId: dailyScore.id } });
   const explainedParts = result.parts.map((part) => ({ ...part, details: metricDetails.get(part.label) ?? null }));
   if (explainedParts.length) await prisma.dailyScoreComponent.createMany({ data: explainedParts.map((part) => ({ dailyScoreId: dailyScore.id, ...part, details: part.details ?? undefined })) });
-  return { ...result, parts: explainedParts, summary };
+  return { ...result, hasScore: true, parts: explainedParts, summary };
 }
 
 function metricEvaluation(metric: ScoreInputs["scoreMetrics"][number], entry: ScoreInputs["entries"][number] | undefined) {
@@ -133,7 +133,7 @@ export async function setCompletion(userId: string, type: "task" | "habit" | "su
   if (type === "task") await prisma.taskCompletion.upsert({ where: { userId_taskId_localDate: { userId, taskId: id, localDate: date } }, update: { state: "COMPLETED" }, create: { userId, taskId: id, localDate: date } });
   if (type === "habit") await prisma.habitCompletion.upsert({ where: { userId_habitId_localDate: { userId, habitId: id, localDate: date } }, update: { state: "COMPLETED" }, create: { userId, habitId: id, localDate: date } });
   if (type === "supplement") { const supplement = await prisma.supplement.findFirst({ where: { id, userId } }); if (supplement) await prisma.supplementLog.upsert({ where: { userId_supplementId_localDate: { userId, supplementId: id, localDate: date } }, update: { state: "COMPLETED" }, create: { userId, supplementId: id, localDate: date, configurationSnapshot: { name: supplement.name, intendedDose: supplement.intendedDose, doseUnit: supplement.doseUnit, normalTime: supplement.normalTime, frequency: supplement.frequency } } }); }
-  await getTodayView(userId);
+  return getTodayView(userId);
 }
 
 export async function addTask(userId: string, title: string, priority: TaskPriority) {
@@ -150,7 +150,7 @@ export async function saveCheckIn(userId: string, fields: Record<string, FormDat
     if (!value) return [];
     return prisma.metricEntry.upsert({ where: { userId_metricDefinitionId_localDate: { userId, metricDefinitionId: definition.id, localDate: date } }, update: value, create: { userId, metricDefinitionId: definition.id, localDate: date, ...value } });
   }));
-  await prisma.dailyCheckIn.upsert({ where: { userId_localDate: { userId, localDate: date } }, update: { reflection: String(fields.reflection ?? "").trim() || null, completedAt: new Date() }, create: { userId, localDate: date, timezone: "Europe/Lisbon", reflection: String(fields.reflection ?? "").trim() || null, completedAt: new Date() } });
+  await prisma.dailyCheckIn.upsert({ where: { userId_localDate: { userId, localDate: date } }, update: { ...(fields.reflection !== undefined ? { reflection: String(fields.reflection).trim() || null } : {}), completedAt: new Date() }, create: { userId, localDate: date, timezone: "Europe/Lisbon", reflection: String(fields.reflection ?? "").trim() || null, completedAt: new Date() } });
   await getTodayView(userId);
   const pathways = await prisma.goalPathway.findMany({ where: { userId, status: "ACTIVE" }, select: { id: true } });
   await Promise.all(pathways.map((pathway) => recalculatePathway(userId, pathway.id)));

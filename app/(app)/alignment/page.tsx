@@ -1,22 +1,134 @@
 import Link from "next/link";
 import { requireUser } from "@/lib/auth/session";
 import { prisma } from "@/lib/db/prisma";
-
+import { trajectoryLabel } from "@/lib/life-os/experience";
 export default async function AlignmentPage() {
   const user = await requireUser();
-  const areas = await prisma.lifeArea.findMany({ where: { userId: user.id, active: true }, include: { objectives: { where: { active: true }, include: { pathway: { include: { milestones: { orderBy: { sequence: "asc" } }, actions: { where: { active: true }, orderBy: { priority: "asc" }, take: 1 } } } }, orderBy: { priority: "asc" } } }, orderBy: { sortOrder: "asc" } });
-  const strategic = areas.filter((area) => area.objectives.some((objective) => objective.pathway?.status === "ACTIVE")).slice(0, 3);
-  const attention = areas.filter((area) => !area.objectives.some((objective) => objective.pathway?.status === "ACTIVE")).slice(0, 3);
-  const defined = areas.filter((area) => area.objectives.some((objective) => objective.pathway?.status === "ACTIVE")).length;
-  const focus = strategic[0]; const focusPathway = focus?.objectives.find((objective) => objective.pathway?.status === "ACTIVE")?.pathway;
-  return <div className="page alignment-index">
-    <section className="alignment-intro"><div><p className="eyebrow">Alignment</p><h2>The life you are building.</h2><p>Set direction once, then let Today, check-ins and reviews turn it into an adaptive operating rhythm.</p></div><div className="alignment-definition"><strong>{defined}<small>of {areas.length} areas defined</small></strong><span>Life OS can act confidently where direction is clear.</span></div></section>
-    <section className="alignment-focus"><div><p className="eyebrow">Current strategic focus</p><h3>{focus ? focus.name : "Direction is waiting"}</h3><p>{focusPathway?.desiredDescription || focus?.objectives[0]?.title || "Choose one area for Life OS to understand first."}</p></div>{focus ? <Link className="button" href={`/alignment/${focus.id}`}>Explore {focus.name}</Link> : <Link className="button" href="/settings">Define a life area</Link>}</section>
-    <section className="operating-loop panel" aria-label="How Life OS works"><p className="eyebrow">The operating loop</p><div><Link href="/alignment"><b>01</b><strong>Align</strong><span>Define what matters</span></Link><i>→</i><Link href="/today"><b>02</b><strong>Act</strong><span>Do what moves it</span></Link><i>→</i><Link href="/check-in"><b>03</b><strong>Observe</strong><span>Record reality</span></Link><i>→</i><Link href="/weekly-review"><b>04</b><strong>Review</strong><span>Adapt the strategy</span></Link></div></section>
-    <section className="life-map"><div className="life-map-head"><p className="eyebrow">The life you’re building</p><h3>Direction becomes execution through a small number of explicit strategic chains.</h3></div><div className="life-map-rail">{strategic.length ? strategic.map((area) => { const pathway = area.objectives.find((objective) => objective.pathway?.status === "ACTIVE")?.pathway; const milestone = pathway?.milestones.find((item) => item.status === "ACTIVE"); return <Link key={area.id} href={`/alignment/${area.id}`}><small>LIFE AREA</small><strong>{area.name}</strong><span>{pathway?.desiredDescription}</span><b>{milestone?.title || "Define next milestone"}</b><i>Explore path →</i></Link>; }) : <p>Define an approved pathway to make a strategic chain visible here.</p>}</div><p className="life-map-note">Only approved links appear here. Life OS will not invent cross-life relationships when the current model does not support them.</p></section>
-    <section className="alignment-section-head"><div><p className="eyebrow">One life, many domains</p><h3>Life areas</h3></div><p>Each area is a strategic domain, not a configuration category. Open one to inspect its direction, evidence and next decision.</p></section>
-    <section className="life-area-grid">{areas.map((area) => { const route = area.objectives.find((objective) => objective.pathway?.status === "ACTIVE")?.pathway; const next = route?.milestones.find((milestone) => milestone.status === "ACTIVE"); const state = route?.status === "ACTIVE" ? "Aligned" : area.objectives.length ? "Developing" : "Needs direction"; return <Link href={`/alignment/${area.id}`} key={area.id} className={`life-area-card ${state.toLowerCase().replaceAll(" ", "-")}`}><div><small>{state}</small><strong>{area.name}</strong></div><p>{route?.desiredDescription || area.objectives[0]?.title || "Life OS needs a clear outcome here."}</p><span><b>{next?.title || (route ? "Next milestone to define" : "Continue Alignment")}</b><i>→</i></span></Link>; })}</section>
-    {attention.length ? <section className="alignment-attention"><div><p className="eyebrow">Attention required</p><h3>Life OS needs a little more direction.</h3></div><div>{attention.map((area) => <Link key={area.id} href={`/alignment/${area.id}`}>{area.name}<span>{area.objectives.length ? "Turn this into an active pathway" : "Define what a good outcome looks like"}</span><i>→</i></Link>)}</div></section> : null}
-    <section className="alignment-continuation"><span>Next: turn direction into a deliberate day.</span><Link href="/today">Open Today →</Link></section>
-  </div>;
+  const areas = await prisma.lifeArea.findMany({
+    where: { userId: user.id, active: true },
+    include: {
+      objectives: {
+        where: { active: true },
+        include: {
+          pathway: {
+            include: {
+              milestones: { orderBy: { sequence: "asc" } },
+              trajectorySnapshots: { orderBy: { localDate: "desc" }, take: 1 },
+            },
+          },
+        },
+        orderBy: { priority: "asc" },
+      },
+    },
+    orderBy: { sortOrder: "asc" },
+  });
+  const active = areas.flatMap((area) =>
+    area.objectives
+      .filter((o) => o.pathway?.status === "ACTIVE")
+      .map((objective) => ({ area, objective, pathway: objective.pathway! })),
+  );
+  const concerns = active.filter(({ pathway }) =>
+    ["BEHIND", "STALLED", "WATCH"].includes(
+      pathway.trajectorySnapshots[0]?.status ?? pathway.trajectoryStatus,
+    ),
+  );
+  return (
+    <div className="page alignment-home">
+      <section className="section-intro">
+        <div>
+          <p className="eyebrow">The life you want, made practical</p>
+          <h2>
+            Choose your direction.
+            <br />
+            Keep it in view.
+          </h2>
+          <p>
+            {active.length
+              ? `${active.length} active ${active.length === 1 ? "strategy" : "strategies"}. Refine what matters when life changes; let Today handle execution.`
+              : "Start with one area that matters. Life OS will help you define a direction and a practical next step."}
+          </p>
+        </div>
+        <Link className="button" href="/today">
+          What matters today →
+        </Link>
+      </section>
+      {concerns.length > 0 && (
+        <section className="attention-strip">
+          <p className="eyebrow">Worth your attention</p>
+          {concerns.slice(0, 3).map(({ area, pathway }) => (
+            <Link key={pathway.id} href={`/alignment/${area.id}`}>
+              <b>{area.name}</b>
+              <span>
+                {trajectoryLabel(
+                  pathway.trajectorySnapshots[0]?.status ??
+                    pathway.trajectoryStatus,
+                )}
+              </span>
+              <span>Review →</span>
+            </Link>
+          ))}
+        </section>
+      )}
+      <section className="direction-list" aria-label="Life areas">
+        {areas.map((area) => {
+          const path = area.objectives.find(
+            (o) => o.pathway?.status === "ACTIVE",
+          )?.pathway;
+          const next = path?.milestones.find((m) => m.status === "ACTIVE");
+          return (
+            <Link
+              key={area.id}
+              href={`/alignment/${area.id}`}
+              className={`direction-row ${path ? "has-direction" : ""}`}
+            >
+              <div>
+                <span className="eyebrow">
+                  {path
+                    ? "Active strategy"
+                    : area.objectives.length
+                      ? "Direction taking shape"
+                      : "Open to explore"}
+                </span>
+                <h3>{area.name}</h3>
+              </div>
+              <div>
+                <strong>
+                  {path?.desiredDescription ??
+                    area.objectives[0]?.title ??
+                    "What would a good life here look like?"}
+                </strong>
+                <p>
+                  {next
+                    ? `Next: ${next.title}`
+                    : path
+                      ? "Review the next checkpoint."
+                      : "Define this when it deserves your attention."}
+                </p>
+              </div>
+              <span className="direction-status">
+                {path
+                  ? trajectoryLabel(
+                      path.trajectorySnapshots[0]?.status ??
+                        path.trajectoryStatus,
+                    )
+                  : "Explore"}{" "}
+                <i>→</i>
+              </span>
+            </Link>
+          );
+        })}
+      </section>
+      <details className="quiet-details">
+        <summary>How direction becomes a day</summary>
+        <p>
+          Tell Life OS where you are and what you want. Review the proposed
+          strategy before approving it. Linked actions appear on Today;
+          observations and reviews show whether the strategy needs to change.
+        </p>
+        <Link href="/settings">
+          Need precise manual control? Advanced configuration →
+        </Link>
+      </details>
+    </div>
+  );
 }

@@ -1,57 +1,404 @@
 "use client";
-
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
-import { AskLifeOs } from "@/components/ask-life-os";
-import { displayMetric } from "@/lib/intelligence/alignment-command";
-
-type Command = NonNullable<Awaited<ReturnType<typeof import("@/lib/intelligence/alignment-command").getAlignmentCommand>>>;
-type Pathway = Command["pathways"][number]["pathway"];
-type Snapshot = Pathway["trajectorySnapshots"][number] | undefined;
-type Focus = "current" | "desired" | "gap" | "strategy" | "milestone" | "now" | null;
-const labels: Record<Exclude<Focus, null>, string> = { current: "Current", desired: "Desired", gap: "Gap", strategy: "Strategy", milestone: "Milestone", now: "Today" };
-
-export function AlignmentCommandCentre({ command }: { command: Command }) {
-  const { area, pathways, metrics } = command;
-  const [focus, setFocus] = useState<Focus>(null);
-  useEffect(() => { const clear = (event: KeyboardEvent) => { if (event.key === "Escape") setFocus(null); }; window.addEventListener("keydown", clear); return () => window.removeEventListener("keydown", clear); }, []);
-  const primary = pathways[0]; const pathway = primary?.pathway; const objective = primary?.objective;
-  const next = pathway?.milestones.find((item) => item.status === "ACTIVE"); const snapshot = pathway?.trajectorySnapshots[0];
-  const evidence = area.alignmentSessions[0]?.assertions ?? [];
-  const current = evidence.filter((item) => item.category === "CURRENT");
-  const desired = evidence.filter((item) => ["DESIRED", "MOTIVATION", "PRIORITY", "CONSTRAINT", "ANTI_GOAL"].includes(item.category));
-  const actions = pathway?.actions ?? []; const behaviours = area.habits.filter((habit) => !objective || habit.objectiveId === objective.id);
-  const today = useMemo(() => [...actions.map((action) => ({ id: action.id, title: action.title, why: action.rationale, kind: "STRATEGY ACTION" })), ...behaviours.map((habit) => ({ id: habit.id, title: habit.name, why: habit.notes || "Configured as a repeatable leading behaviour in this life area.", kind: "BEHAVIOUR" })), ...area.tasks.filter((task) => !objective || task.objectiveId === objective.id).map((task) => ({ id: task.id, title: task.title, why: "A scheduled Today action linked to this objective.", kind: "TODAY ACTION" }))].slice(0, 3), [actions, behaviours, area.tasks, objective]);
-  const confidence = pathway?.confidence?.replaceAll("_", " ") ?? (evidence.length ? "MEDIUM" : "INSUFFICIENT DATA");
-  const stages: Array<{ id: Exclude<Focus, null>; type: string; title: string; text: string }> = [
-    { id: "current", type: "CURRENT REALITY", title: pathway?.currentDescription || "Current reality not defined", text: current[0]?.content || "Your stated baseline and observed signals." },
-    { id: "desired", type: "DESIRED OUTCOME", title: pathway?.desiredDescription || objective?.title || "Desired outcome not defined", text: desired[0]?.content || "The outcome Life OS is helping to serve." },
-    { id: "gap", type: "MEASURED GAP", title: pathway?.baselineValue != null && pathway?.targetValue != null ? `${pathway.baselineValue}${pathway.unit ? ` ${pathway.unit}` : ""} → ${pathway.targetValue}${pathway.unit ? ` ${pathway.unit}` : ""}` : "Gap not measured", text: pathway ? `Direction: ${pathway.direction === "DECREASE" ? "lower is better" : "higher is better"}.` : "Define a baseline and target to make the gap measurable." },
-    { id: "strategy", type: "STRATEGY", title: actions[0]?.title || "Strategy not defined", text: pathway?.constraints ? `Constraint held: ${pathway.constraints}` : actions[0]?.rationale || "Turn the outcome into an approved approach." },
-    { id: "milestone", type: "NEXT MILESTONE", title: next?.title || "Next milestone not defined", text: snapshot?.basis || next?.description || "A measurable checkpoint turns strategy into evidence." },
-    { id: "now", type: "TODAY", title: today[0]?.title || "No linked action", text: today[0]?.why || "No current action is linked to this outcome." }
+import { useState } from "react";
+import { AskLifeOs } from "./ask-life-os";
+import { metricValue, trajectoryLabel } from "@/lib/life-os/experience";
+import { DetailSheet } from "./detail-sheet";
+type Command = NonNullable<
+  Awaited<
+    ReturnType<
+      typeof import("@/lib/intelligence/alignment-command").getAlignmentCommand
+    >
+  >
+>;
+export function AlignmentCommandCentre({
+  command,
+  onRefine,
+}: {
+  command: Command;
+  onRefine?: () => void;
+}) {
+  const { area, metrics } = command;
+  const active = command.pathways.filter((p) => p.pathway.status === "ACTIVE");
+  const [chosen, setChosen] = useState(active[0]?.pathway.id);
+  const [focus, setFocus] = useState<string | null>(null);
+  const primary = active.find((p) => p.pathway.id === chosen) ?? active[0];
+  const pathway = primary?.pathway;
+  const objective = primary?.objective;
+  const next = pathway?.milestones.find((m) => m.status === "ACTIVE");
+  const snapshot = pathway?.trajectorySnapshots[0];
+  const bindings = pathway?.metrics ?? [];
+  const primaryBinding = bindings.find((b) => b.role === "PRIMARY");
+  const entry = metrics.find(
+    (e) => e.metricDefinitionId === primaryBinding?.metricDefinitionId,
+  );
+  const behaviour = area.habits.filter((h) => h.objectiveId === objective?.id);
+  const tasks = area.tasks.filter((t) => t.objectiveId === objective?.id);
+  const status = snapshot?.status ?? pathway?.trajectoryStatus;
+  const stages = [
+    {
+      id: "outcome",
+      label: "Where you want to go",
+      title: pathway?.desiredDescription ?? "Define your outcome",
+    },
+    {
+      id: "strategy",
+      label: "Current approach",
+      title: pathway?.actions[0]?.title ?? "Shape the strategy",
+    },
+    {
+      id: "milestones",
+      label: "Next checkpoint",
+      title: next?.title ?? "Choose a checkpoint",
+    },
+    {
+      id: "measures",
+      label: "How you will know",
+      title: primaryBinding?.metricDefinition.name ?? "Choose a useful measure",
+    },
+    {
+      id: "actions",
+      label: "What you can do",
+      title: behaviour[0]?.name ?? tasks[0]?.title ?? "Connect an action",
+    },
   ];
-  return <div className="alignment-command">
-    <section className="command-hero"><div><p className="eyebrow">Life area architecture</p><h2>{area.name}</h2><p>Trace the approved path from life direction to today’s execution. Select a layer to bring its connected evidence into focus.</p></div><div className="command-confidence"><b>{confidence}</b><span>evidence confidence</span></div></section>
-    <section className="strategic-spine" aria-label="Strategic spine">{stages.map((stage, index) => <div key={stage.id} className={`spine-step ${focus && focus !== stage.id ? "receded" : ""} ${focus === stage.id ? "focused" : ""}`}><button onClick={() => setFocus(focus === stage.id ? null : stage.id)} aria-pressed={focus === stage.id}><small>{stage.type}</small><strong>{stage.title}</strong><span>Show connection</span></button>{index < stages.length - 1 ? <i aria-hidden="true">↓</i> : null}</div>)}</section>
-    {focus ? <section className="relationship-focus" aria-live="polite"><div><p className="eyebrow">Meaning path</p><h3>{labels[focus]} in context</h3><p>Select another layer to follow the chain, or clear focus to return to the whole architecture.</p></div><button className="quiet" onClick={() => setFocus(null)}>Clear focus</button></section> : null}
-    <section className="command-grid">
-      <Layer id="current" focus={focus} title="Current reality" kicker="Where I am" pathwayId={pathway?.id} lifeAreaId={area.id} ask="What evidence supports this current reality?"><p>{pathway?.currentDescription || "We have not defined your current reality yet."}</p>{current.length ? <Evidence items={current} /> : null}<MetricRows bindings={pathway?.metrics ?? []} entries={metrics} /></Layer>
-      <Layer id="desired" focus={focus} title="Desired reality" kicker="Outcome" pathwayId={pathway?.id} lifeAreaId={area.id} ask="Is this target realistic given my constraints?"><p>{pathway?.desiredDescription || objective?.title || "We have not defined success yet."}</p>{desired.length ? <Evidence items={desired} /> : null}<MeaningCrumb parts={[area.name, objective?.title, pathway?.desiredDescription].filter(Boolean) as string[]} /></Layer>
-      <Layer id="gap" focus={focus} title="Current → target" kicker="Measured comparison" pathwayId={pathway?.id} lifeAreaId={area.id} ask="What is the biggest constraint between current and target?"><CurrentTarget pathway={pathway} snapshot={snapshot} /><p className="relationship-note">This is a measurement relationship, not a claim about what causes the outcome.</p></Layer>
-      <Layer id="strategy" focus={focus} title="Current strategy" kicker="The approved approach" pathwayId={pathway?.id} lifeAreaId={area.id} ask="Why this strategy, and what alternative should I consider?">{actions.length ? <ul className="strategy-list">{actions.map((action) => <li key={action.id}><small>STRATEGY ACTION · DIRECTLY CONTRIBUTES TO</small><b>{action.title}</b><span>{action.rationale}</span></li>)}</ul> : <Gap text="We know the direction, but not the smallest reliable strategy." areaId={area.id} />}</Layer>
-      <Layer id="milestone" focus={focus} title="Milestone progression" kicker="The next unlock" pathwayId={pathway?.id} lifeAreaId={area.id} ask="Why is this the next milestone?">{pathway?.milestones.length ? <ol className="milestone-progression">{pathway.milestones.map((milestone) => <li key={milestone.id} className={milestone.status.toLowerCase()}><small>{milestone.status === "ACTIVE" ? "NEXT" : milestone.status}</small><b>{milestone.title}</b><span>{milestone.targetValue != null ? `${milestone.targetValue}${milestone.unit ? ` ${milestone.unit}` : ""}` : milestone.description || "Approved pathway checkpoint"}</span></li>)}</ol> : <Gap text="We know the direction, but not the next measurable unlock." areaId={area.id} />}<Trajectory snapshot={snapshot} pathway={pathway} /></Layer>
-      <Layer id="now" focus={focus} title="What matters now" kicker="Highest-leverage execution" pathwayId={pathway?.id} lifeAreaId={area.id} ask="What is the single highest-leverage variable right now?">{today.length ? <ol className="now-list">{today.map((item, index) => <li key={item.id}><b>0{index + 1}</b><span><small>{item.kind} · EXPLICIT</small><strong>{item.title}</strong><em>Why now: {item.why}</em><button className="why-toggle" onClick={() => setFocus("now")}>Show connection →</button></span></li>)}</ol> : <Gap text="No active action is connected to this outcome." areaId={area.id} />}</Layer>
+  return (
+    <section className="area-strategy">
+      <div className="area-heading">
+        <div>
+          <p className="eyebrow">
+            {pathway ? "Active strategy" : "Direction to explore"}
+          </p>
+          <h2>{area.name}</h2>
+        </div>
+        <button className="quiet" onClick={onRefine}>
+          Something changed? Refine →
+        </button>
+      </div>
+      {active.length > 1 && (
+        <label className="objective-picker">
+          Current objective
+          <select value={chosen} onChange={(e) => setChosen(e.target.value)}>
+            {active.map((p) => (
+              <option key={p.pathway.id} value={p.pathway.id}>
+                {p.objective.title}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {pathway ? (
+        <>
+          <div className="area-state">
+            <div>
+              <small>{entry ? "Latest observation" : "Starting point"}</small>
+              <strong>
+                {entry
+                  ? metricValue(entry, primaryBinding?.metricDefinition.unit)
+                  : pathway.currentDescription}
+              </strong>
+              <span>
+                {entry
+                  ? entry.localDate.toISOString().slice(0, 10)
+                  : "Stated baseline; no later measurement"}
+              </span>
+            </div>
+            <i aria-hidden="true">→</i>
+            <div>
+              <small>Desired outcome</small>
+              <strong>{pathway.desiredDescription}</strong>
+              <span>{objective?.title}</span>
+            </div>
+          </div>
+          <div className="trajectory-reading">
+            <div>
+              <span className={`status-marker ${status?.toLowerCase()}`} />
+              <strong>{trajectoryLabel(status)}</strong>
+            </div>
+            <p>
+              {snapshot?.basis ??
+                "There are not enough observations to assess progress yet."}
+            </p>
+            <div className="trajectory-next">
+              <small>Next checkpoint</small>
+              <strong>{next?.title ?? "Define the next checkpoint"}</strong>
+              <button
+                className="text-button"
+                onClick={() => setFocus("milestones")}
+              >
+                See progression →
+              </button>
+            </div>
+          </div>
+          <section className="strategy-focus">
+            <p className="eyebrow">What matters now</p>
+            <h3>
+              {pathway.actions[0]?.title ??
+                "Turn the strategy into one practical action."}
+            </h3>
+            <p>
+              {pathway.actions[0]?.rationale ??
+                "Your outcome is defined. Choose a repeatable way to make progress."}
+            </p>
+            {pathway.constraints && (
+              <details>
+                <summary>Constraints this must respect</summary>
+                <p>{pathway.constraints}</p>
+              </details>
+            )}
+            <div className="inline-actions">
+              <Link className="button" href="/today">
+                Put it into practice →
+              </Link>
+              <AskLifeOs
+                pathwayId={pathway.id}
+                lifeAreaId={area.id}
+                prompts={[
+                  "What is currently holding me back?",
+                  "What should stay the same this week?",
+                ]}
+              />
+            </div>
+          </section>
+          <section className="meaning-spine" aria-label="Strategic spine">
+            <p className="eyebrow">The path, explained</p>
+            {stages.map((s, i) => (
+              <button
+                key={s.id}
+                onClick={() => setFocus(s.id)}
+                className={focus === s.id ? "selected" : ""}
+              >
+                <span>{String(i + 1).padStart(2, "0")}</span>
+                <div>
+                  <small>{s.label}</small>
+                  <strong>{s.title}</strong>
+                </div>
+                <i>→</i>
+              </button>
+            ))}
+          </section>
+          {(!bindings.length || (!behaviour.length && !tasks.length)) && (
+            <section className="connection-gap">
+              <h3>
+                {!bindings.length
+                  ? "How will you know it is working?"
+                  : "What will you consistently do?"}
+              </h3>
+              <p>
+                {!bindings.length
+                  ? "Your direction is set, but a progress measure is not linked yet."
+                  : "The strategy has a progress measure, but no behaviour or scheduled task is linked to the objective."}
+              </p>
+              <button className="text-button" onClick={onRefine}>
+                Work this out with Life OS →
+              </button>
+            </section>
+          )}
+        </>
+      ) : (
+        <section className="connection-gap">
+          <h3>What would you like to be different?</h3>
+          <p>
+            {area.objectives[0]?.title ??
+              "You do not need to optimise every area at once. Start here when it matters to you."}
+          </p>
+          <button onClick={onRefine}>Align {area.name}</button>
+        </section>
+      )}
+      {focus && pathway && (
+        <DetailSheet
+          title={stages.find((s) => s.id === focus)?.label ?? "Your strategy"}
+          onClose={() => setFocus(null)}
+        >
+          <nav className="meaning-breadcrumb" aria-label="Strategic context">
+            <button className="text-button" onClick={() => setFocus("outcome")}>
+              {area.name}
+            </button>
+            <span>/</span>
+            <span>{objective?.title}</span>
+          </nav>
+          {focus === "outcome" && (
+            <>
+              <h3>{pathway.desiredDescription}</h3>
+              <p>{objective?.description}</p>
+              <dl>
+                <dt>Starting point</dt>
+                <dd>{pathway.currentDescription}</dd>
+                <dt>Approved outcome</dt>
+                <dd>{pathway.desiredDescription}</dd>
+                <dt>Time horizon</dt>
+                <dd>
+                  {pathway.desiredDate?.toISOString().slice(0, 10) ??
+                    "No fixed date"}
+                </dd>
+              </dl>
+              <button
+                className="text-button"
+                onClick={() => setFocus("strategy")}
+              >
+                How are we getting there? →
+              </button>
+            </>
+          )}
+          {focus === "strategy" && (
+            <>
+              <p>{pathway.constraints}</p>
+              {pathway.actions.map((a) => (
+                <article className="detail-row" key={a.id}>
+                  <h3>{a.title}</h3>
+                  <p>{a.rationale}</p>
+                  {a.expectedImpact && (
+                    <details>
+                      <summary>Expected impact</summary>
+                      <p>{a.expectedImpact}</p>
+                      <small>
+                        This is the strategy’s expectation, not a measured
+                        effect.
+                      </small>
+                    </details>
+                  )}
+                </article>
+              ))}
+              <button
+                className="text-button"
+                onClick={() => setFocus("actions")}
+              >
+                See linked behaviours →
+              </button>
+            </>
+          )}
+          {focus === "milestones" && (
+            <>
+              <p>
+                Checkpoints from your approved pathway, in their configured
+                order.
+              </p>
+              <ol className="milestone-progression">
+                {pathway.milestones.map((m) => (
+                  <li key={m.id} className={m.status.toLowerCase()}>
+                    <small>
+                      {m.status === "ACTIVE" ? "Next" : m.status.toLowerCase()}
+                    </small>
+                    <b>{m.title}</b>
+                    <p>{m.description}</p>
+                    {m.targetValue != null && (
+                      <span>
+                        Target: {m.targetValue} {m.unit}
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ol>
+              <p>
+                {trajectoryLabel(status)}. {snapshot?.basis}
+              </p>
+              {snapshot?.estimateLowDate && (
+                <p>
+                  Estimated outcome window:{" "}
+                  {snapshot.estimateLowDate.toISOString().slice(0, 10)} to{" "}
+                  {snapshot.estimateHighDate?.toISOString().slice(0, 10)}.
+                  Confidence: {snapshot.confidence.toLowerCase()}.
+                </p>
+              )}
+              <button
+                className="text-button"
+                onClick={() => setFocus("measures")}
+              >
+                Inspect the evidence →
+              </button>
+            </>
+          )}
+          {focus === "measures" && (
+            <>
+              {bindings.map((b) => {
+                const actual = metrics.find(
+                  (e) => e.metricDefinitionId === b.metricDefinitionId,
+                );
+                return (
+                  <article className="detail-row" key={b.id}>
+                    <small>
+                      {b.role === "PRIMARY"
+                        ? "Primary measure"
+                        : "Supporting measure"}
+                    </small>
+                    <h3>{b.metricDefinition.name}</h3>
+                    <p>{b.rationale}</p>
+                    <dl>
+                      <dt>Latest recorded</dt>
+                      <dd>
+                        {metricValue(actual, b.metricDefinition.unit)}
+                        {actual
+                          ? ` · ${actual.localDate.toISOString().slice(0, 10)}`
+                          : ""}
+                      </dd>
+                      {b.role === "PRIMARY" && (
+                        <>
+                          <dt>Next checkpoint</dt>
+                          <dd>
+                            {next?.targetValue != null
+                              ? `${next.targetValue} ${next.unit ?? ""}`
+                              : (next?.title ?? "Not defined")}
+                          </dd>
+                          <dt>Longer-term target</dt>
+                          <dd>
+                            {pathway.targetValue} {pathway.unit}
+                          </dd>
+                        </>
+                      )}
+                    </dl>
+                  </article>
+                );
+              })}
+              <p className="muted">
+                The behaviours below share this objective. Their individual
+                effect on a measure is not established.
+              </p>
+              <button
+                className="text-button"
+                onClick={() => setFocus("actions")}
+              >
+                See what you can do →
+              </button>
+            </>
+          )}
+          {focus === "actions" && (
+            <>
+              {behaviour.map((h) => (
+                <article className="detail-row" key={h.id}>
+                  <small>Repeated behaviour</small>
+                  <h3>{h.name}</h3>
+                  <p>{h.notes ?? `Linked to ${objective?.title}.`}</p>
+                  <p>
+                    {h.targetCount} per {h.targetPeriod} ·{" "}
+                    {h.frequency.toLowerCase()}
+                  </p>
+                </article>
+              ))}
+              {tasks.map((t) => (
+                <article className="detail-row" key={t.id}>
+                  <small>Scheduled task</small>
+                  <h3>{t.title}</h3>
+                </article>
+              ))}
+              {behaviour.length + tasks.length === 0 && (
+                <p>No daily execution is linked yet.</p>
+              )}
+              <Link href="/today">See what is scheduled today →</Link>
+            </>
+          )}
+          <div className="detail-footer">
+            <button
+              className="quiet"
+              onClick={() => {
+                setFocus(null);
+                onRefine?.();
+              }}
+            >
+              Reconsider this with Life OS
+            </button>
+          </div>
+        </DetailSheet>
+      )}
     </section>
-    <section className="relationship-chain panel"><p className="eyebrow">Today, explained</p><h3>Every linked action has strategic parentage.</h3>{today.length && objective ? <div className="causal-chain">{today.map((item) => <details key={item.id}><summary><span><small>{item.kind}</small><strong>{item.title}</strong></span><b>Why this?</b></summary><div><MeaningCrumb parts={["Today", item.title, pathway?.metrics[0]?.metricDefinition.name || "Measurement to define", next?.title || "Milestone to define", objective.title, area.name]} /><p><b>Moves:</b> {next?.title || "the approved objective"}. <b>Serves:</b> {pathway?.desiredDescription || objective.title}. <b>Relationship:</b> {item.kind === "BEHAVIOUR" ? "supports" : "directly contributes to"} the approved strategy.</p><Link href={`/alignment/${area.id}#strategy`}>View {area.name} strategy →</Link></div></details>)}</div> : <Gap text="This action is scheduled, but Life OS cannot confidently link it to an approved outcome yet." areaId={area.id} />}</section>
-    <section className="relationship-gaps"><div><p className="eyebrow">Model hygiene</p><h3>Connection gaps</h3></div>{!pathway ? <Gap text="This life area has no approved pathway yet, so Life OS cannot turn direction into a reliable daily chain." areaId={area.id} /> : !pathway.metrics.length ? <Gap text="We know the outcome, but not the progress signal that will tell us if the strategy is working." areaId={area.id} /> : !today.length ? <Gap text="We know what to measure, but not what should consistently move it." areaId={area.id} /> : <p>Every active layer in this route has a canonical connection. Review the chain whenever your reality changes.</p>}</section>
-    <section className="command-controls"><div><p className="eyebrow">Discuss the strategy</p><h3>Challenge a relationship before changing it.</h3><p>Connections are derived from approved pathways and configuration. Ask Life OS only when you want a new interpretation.</p></div><AskLifeOs pathwayId={pathway?.id} lifeAreaId={area.id} prompts={["Why this?", "What is limiting this?", "Is this milestone still right?"]} /><Link className="quiet button" href={`/alignment/${area.id}#conversation`}>Discuss with Life OS</Link></section>
-  </div>;
+  );
 }
-function Layer({ id, focus, title, kicker, ask, pathwayId, lifeAreaId, children }: { id: Exclude<Focus, null>; focus: Focus; title: string; kicker: string; ask: string; pathwayId?: string; lifeAreaId: string; children: React.ReactNode }) { return <details className={`command-layer ${focus && focus !== id ? "receded" : ""} ${focus === id ? "focused" : ""}`} open={id === "current" || id === "now" || focus === id}><summary><span><small>{kicker}</small><strong>{title}</strong></span><i>+</i></summary><div className="command-layer-body">{children}<AskLifeOs pathwayId={pathwayId} lifeAreaId={lifeAreaId} prompts={[ask]} /></div></details>; }
-function MeaningCrumb({ parts }: { parts: string[] }) { return <div className="meaning-crumb" aria-label="Strategic parentage">{parts.map((part, index) => <span key={`${part}-${index}`}>{part}{index < parts.length - 1 ? <i>→</i> : null}</span>)}</div>; }
-function Evidence({ items }: { items: Array<{ id: string; content: string; source: string; confidence: string }> }) { return <div className="evidence-list">{items.map((item) => <span key={item.id}><b>{item.source === "STATED" ? "STATED · YOU SAID" : item.source === "OBSERVED" ? "OBSERVED" : "INFERRED · LIFE OS THINKS"}</b>{item.content}{item.source === "INFERRED" ? <small>Confidence: {item.confidence.replaceAll("_", " ")}</small> : null}</span>)}</div>; }
-function MetricRows({ bindings, entries }: { bindings: Pathway["metrics"]; entries: Command["metrics"] }) { return bindings.length ? <div className="metric-strip">{bindings.map((binding) => { const entry = entries.find((item) => item.metricDefinitionId === binding.metricDefinitionId); return <details key={binding.id}><summary><span><small>METRIC · {binding.role}</small><b>{binding.metricDefinition.name}</b><em>{entry ? displayMetric(entry, binding.metricDefinition.unit) : "No observation yet"}</em></span><i>+</i></summary><div><p><b>Measures:</b> pathway progress for this approved strategy.</p><p><b>Current:</b> {entry ? displayMetric(entry, binding.metricDefinition.unit) : "No observation yet"}</p><p><b>Why it exists:</b> {binding.rationale}</p></div></details>; })}</div> : null; }
-function CurrentTarget({ pathway, snapshot }: { pathway: Pathway | undefined; snapshot: Snapshot }) { return pathway ? <div className="current-target"><div><small>CURRENT</small><strong>{pathway.baselineValue != null ? `${pathway.baselineValue}${pathway.unit ? ` ${pathway.unit}` : ""}` : pathway.currentDescription}</strong></div><i>→</i><div><small>TARGET</small><strong>{pathway.targetValue != null ? `${pathway.targetValue}${pathway.unit ? ` ${pathway.unit}` : ""}` : pathway.desiredDescription}</strong></div>{snapshot ? <span><b>{snapshot.status.replaceAll("_", " ")}</b> · {snapshot.basis}</span> : null}</div> : <Gap text="Current and target values are not defined yet." areaId="" />; }
-function Trajectory({ snapshot, pathway }: { snapshot: Snapshot; pathway: Pathway | undefined }) { const status = snapshot?.status || pathway?.trajectoryStatus; return status ? <div className="trajectory"><b>{status.replaceAll("_", " ")}</b><span>{snapshot?.basis || "No recent trajectory evidence is available."}</span><small>Confidence: {(snapshot?.confidence || pathway?.confidence || "INSUFFICIENT_DATA").replaceAll("_", " ")}</small></div> : null; }
-function Gap({ text, areaId }: { text: string; areaId: string }) { return <div className="command-empty"><p>{text}</p>{areaId ? <Link href={`/alignment/${areaId}#conversation`}>Figure this out with Life OS →</Link> : null}</div>; }

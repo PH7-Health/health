@@ -1,26 +1,223 @@
 import Link from "next/link";
 import { requireUser } from "@/lib/auth/session";
-import { dateLabel } from "@/lib/life-os/date";
+import { localDate, dateLabel } from "@/lib/life-os/date";
 import { getTodayView } from "@/lib/life-os/service";
-import { TodayControl } from "@/components/today-control";
+import { TodayControl, type TodayItem } from "@/components/today-control";
 import { getIntelligenceView } from "@/lib/intelligence/service";
-import { rankPriorities } from "@/lib/intelligence/analysis";
+import { actionConnection } from "@/lib/life-os/experience";
 import { AskLifeOs } from "@/components/ask-life-os";
-
-export default async function TodayPage({ searchParams }: { searchParams: Promise<{ checkedIn?: string; date?: string }> }) {
-  const user = await requireUser(); const params = await searchParams; const requested=params.date?new Date(`${params.date}T12:00:00.000Z`):undefined; const [state, intelligence] = await Promise.all([getTodayView(user.id, requested), getIntelligenceView(user.id)]);
-  const done = (type: "task" | "habit" | "supplement", targetId: string) => type === "task" ? state.taskCompletions.some((item) => item.taskId === targetId && item.state === "COMPLETED") : type === "habit" ? state.habitCompletions.some((item) => item.habitId === targetId && item.state === "COMPLETED") : state.supplementLogs.some((item) => item.supplementId === targetId && item.state === "COMPLETED");
-  const items=[...state.tasks.map(x=>({id:x.id,title:x.title,meta:x.priority.replaceAll("_"," "),type:"task" as const,done:done("task",x.id)})),...state.supplements.map(x=>({id:x.id,title:x.name,meta:`${x.intendedDose??""} ${x.doseUnit??""}`,type:"supplement" as const,done:done("supplement",x.id)})),...state.habits.map(x=>({id:x.id,title:x.name,meta:x.lifeArea.name,type:"habit" as const,done:done("habit",x.id)}))];
-  const scoreParts = state.parts.map((part) => ({ ...part, details: part.details && typeof part.details === "object" && "ratio" in part.details && "target" in part.details && "actual" in part.details && "reason" in part.details ? part.details as { ratio: number; target: string; actual: string; reason: string } : null }));
-  const prev=new Date(state.date);prev.setDate(prev.getDate()-1);const next=new Date(state.date);next.setDate(next.getDate()+1);const link=(d:Date)=>`/today?date=${d.toISOString().slice(0,10)}`;
-  const priorities = rankPriorities(intelligence.pathways.filter((pathway) => pathway.status === "ACTIVE").flatMap((pathway) => pathway.actions.map((action) => ({
-    id: action.id, title: action.title, reason: action.rationale, goal: pathway.objective.title, area: pathway.objective.lifeArea.name,
-    metric: pathway.metrics[0]?.metricDefinition.name ?? null, milestone: pathway.milestones.find((item) => item.status === "ACTIVE")?.title ?? null,
-    importance: Math.max(1, 6 - pathway.objective.priority), trajectory: pathway.trajectoryStatus,
-    proximity: pathway.milestones.findIndex((item) => item.status === "ACTIVE") === 0 ? 4 : 2,
-    urgency: pathway.trajectoryStatus === "BEHIND" ? 4 : 1, neglect: pathway.trajectoryStatus === "STALLED" ? 3 : 0,
-    impact: Math.max(1, 6 - action.priority)
-  }))));
-  return <div className="page">{params.checkedIn?<p className="notice">Check-in complete. Score refreshed.</p>:null}<AskLifeOs prompts={state.status==="ON_TRACK"?["What is working?","Do I need to change anything?"]:["What should I focus on today?","What is holding me back?"]}/><div className="date-rail"><Link href={link(prev)}>← Previous</Link><span>{dateLabel(state.date)}{!state.isToday?" · History":""}</span>{state.isToday?<span/>:<Link href={link(next)}>Next →</Link>}</div>{state.isToday&&priorities.length?<section className="today-priorities"><p className="eyebrow">What matters today</p><h3>{priorities.length} things move the route forward</h3>{priorities.map((item,index)=><article key={item.id}><strong>0{index+1}</strong><div><b>{item.title}</b><span>Moves: {item.goal}</span><small>{item.reason}</small><details className="today-trace"><summary>Why today?</summary><p><b>Today action</b> → {item.metric || "progress signal to define"} → {item.milestone || "next milestone to define"} → {item.goal} → {item.area}</p><span>This is an explicit pathway connection. <Link href="/alignment">View the strategic chain →</Link></span></details></div></article>)}</section>:null}{state.isToday?<TodayControl score={state.score} status={state.status} parts={scoreParts} items={items}/>:<section className="history-view"><p className="eyebrow">Historical day</p><h2>{state.score}</h2><p>{state.summary}</p><div className="history-grid"><History label="Actions" value={`${state.taskCompletions.length} completed`} /><History label="Habits" value={`${state.habitCompletions.length} recorded`} /><History label="Supplements" value={`${state.supplementLogs.length} logged`} /><History label="Metrics" value={`${state.entries.length} captured`} /></div>{state.checkIn?<p className="history-note">{state.checkIn.reflection || "Check-in recorded."}</p>:<p className="history-note">No check-in recorded.</p>}</section>}{state.alerts.length?<section className="panel alert-grid">{state.alerts.map(alert=><article key={alert.id} className="alert"><strong>{alert.title}</strong><p>{alert.recommendedAction}</p></article>)}</section>:null}</div>;
+export default async function TodayPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ checkedIn?: string; date?: string }>;
+}) {
+  const user = await requireUser();
+  const params = await searchParams;
+  const parsed =
+    params.date && /^\d{4}-\d{2}-\d{2}$/.test(params.date)
+      ? new Date(`${params.date}T00:00:00.000Z`)
+      : undefined;
+  const requested =
+    parsed && Number.isFinite(parsed.getTime()) && parsed <= localDate()
+      ? parsed
+      : undefined;
+  const [state, intelligence] = await Promise.all([
+    getTodayView(user.id, requested),
+    getIntelligenceView(user.id),
+  ]);
+  const connection = (item: {
+    id: string;
+    objectiveId: string | null;
+    lifeAreaId: string | null;
+  }) =>
+    actionConnection(
+      item,
+      intelligence.pathways,
+      state.objectives,
+      state.areas,
+    );
+  const items: TodayItem[] = [
+    ...state.tasks.map((x) => ({
+      id: x.id,
+      title: x.title,
+      meta: x.lifeArea?.name ?? "Work",
+      type: "task" as const,
+      done: state.taskCompletions.some(
+        (i) => i.taskId === x.id && i.state === "COMPLETED",
+      ),
+      rank:
+        x.priority === "MOST_IMPORTANT" ? 0 : x.priority === "CRITICAL" ? 1 : 5,
+      connection: connection(x),
+    })),
+    ...state.habits.map((x) => ({
+      id: x.id,
+      title: x.name,
+      meta: x.lifeArea.name,
+      type: "habit" as const,
+      done: state.habitCompletions.some(
+        (i) => i.habitId === x.id && i.state === "COMPLETED",
+      ),
+      rank: x.objectiveId ? 2 : 6,
+      connection: connection(x),
+    })),
+    ...state.supplements.map((x) => ({
+      id: x.id,
+      title: x.name,
+      meta: `${x.intendedDose ?? ""} ${x.doseUnit ?? ""} · ${x.normalTime ?? "Protocol"}`,
+      type: "supplement" as const,
+      done: state.supplementLogs.some(
+        (i) => i.supplementId === x.id && i.state === "COMPLETED",
+      ),
+      rank: 9,
+      connection: connection({
+        id: x.id,
+        objectiveId: null,
+        lifeAreaId: state.areas.find((a) => a.key === "health")?.id ?? null,
+      }),
+    })),
+  ];
+  const parts = state.parts.map((p) => ({
+    ...p,
+    details:
+      p.details && typeof p.details === "object" && "ratio" in p.details
+        ? (p.details as {
+            ratio: number;
+            target: string;
+            actual: string;
+            reason: string;
+          })
+        : null,
+  }));
+  const prev = new Date(state.date);
+  prev.setUTCDate(prev.getUTCDate() - 1);
+  const next = new Date(state.date);
+  next.setUTCDate(next.getUTCDate() + 1);
+  const href = (d: Date) => `/today?date=${d.toISOString().slice(0, 10)}`;
+  return (
+    <div className="page today-page">
+      <div className="date-rail">
+        <Link href={href(prev)} aria-label="Previous day">
+          ← Previous
+        </Link>
+        <span>
+          {dateLabel(state.date)}
+          {!state.isToday ? " · Read only" : ""}
+        </span>
+        {state.isToday ? (
+          <Link href="/dashboard">Progress →</Link>
+        ) : (
+          <Link href={href(next)} aria-label="Next day">
+            Next →
+          </Link>
+        )}
+      </div>
+      {params.checkedIn && (
+        <p className="success-note" role="status">
+          Check-in saved. Today reflects your recorded values.
+        </p>
+      )}
+      {state.alerts.length > 0 && (
+        <section className="attention-strip">
+          <p className="eyebrow">Needs attention</p>
+          {state.alerts.slice(0, 2).map((a) => (
+            <details key={a.id}>
+              <summary>{a.title}</summary>
+              <p>{a.explanation}</p>
+              <p>{a.recommendedAction}</p>
+            </details>
+          ))}
+        </section>
+      )}
+      {state.isToday ? (
+        <TodayControl
+          score={state.score}
+          status={state.status}
+          parts={parts}
+          items={items}
+        />
+      ) : (
+        <section className="history-view">
+          <p className="eyebrow">Recorded day</p>
+          <h2>
+            {state.hasScore ? `${state.score} / 100` : "No score recorded"}
+          </h2>
+          <p>{state.summary}</p>
+          <details open>
+            <summary>Recorded actions, habits and supplements</summary>
+            {state.taskCompletions.map((i) => (
+              <p key={i.id}>
+                {i.task.title}: {i.state.toLowerCase()}
+              </p>
+            ))}
+            {state.habitCompletions.map((i) => (
+              <p key={i.id}>
+                {i.habit.name}: {i.state.toLowerCase()}
+              </p>
+            ))}
+            {state.supplementLogs.map((i) => (
+              <p key={i.id}>
+                {i.supplement.name}: {i.state.toLowerCase()}
+              </p>
+            ))}
+            {!state.taskCompletions.length &&
+              !state.habitCompletions.length &&
+              !state.supplementLogs.length && (
+                <p>No individual completion records for this day.</p>
+              )}
+            <p className="muted">
+              Only recorded state is shown. Today's schedule is not projected
+              into the past.
+            </p>
+            {state.parts.map((p) => (
+              <p key={p.label}>
+                {p.label}: {p.completed} of {p.expected} recorded in this score
+                snapshot.
+              </p>
+            ))}
+          </details>
+          <details>
+            <summary>Check-in and metrics</summary>
+            {state.entries.map((e) => (
+              <p key={e.id}>
+                {e.metricDefinition.name}:{" "}
+                {e.valueNumber ??
+                  e.valueText ??
+                  (e.valueBoolean == null
+                    ? "Not recorded"
+                    : e.valueBoolean
+                      ? "Yes"
+                      : "No")}
+              </p>
+            ))}
+          </details>
+          <Link href="/today">Return to Today →</Link>
+        </section>
+      )}
+      <details className="quiet-details">
+        <summary>How this fits your current strategy</summary>
+        {intelligence.pathways
+          .filter((p) => p.status === "ACTIVE")
+          .map((p) => (
+            <section key={p.id}>
+              <h3>
+                {p.objective.lifeArea.name}: {p.desiredDescription}
+              </h3>
+              <p>
+                Current phase:{" "}
+                {p.actions[0]?.title ?? "Review the next practical step."}
+              </p>
+              <Link href={`/alignment/${p.objective.lifeAreaId}`}>
+                Review strategy →
+              </Link>
+            </section>
+          ))}
+        <AskLifeOs
+          prompts={[
+            "What is holding me back?",
+            "What can I leave for another day?",
+          ]}
+        />
+      </details>
+    </div>
+  );
 }
-function History({label,value}:{label:string;value:string}){return <div><small>{label}</small><strong>{value}</strong></div>}

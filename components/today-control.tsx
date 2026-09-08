@@ -1,38 +1,259 @@
 "use client";
-
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRef, useState } from "react";
+import Link from "next/link";
 import { completeAction } from "@/app/(app)/actions";
-
-type Item = { id: string; title: string; meta: string; type: "task" | "habit" | "supplement"; done: boolean };
-type MetricDetail = { ratio: number; target: string; actual: string; reason: string };
-type Part = { label: string; expected: number; completed: number; weight: number; contribution?: number; details?: MetricDetail | null };
-
-export function TodayControl({ score, status, parts, items }: { score: number; status: string; parts: Part[]; items: Item[] }) {
-  const router = useRouter();
-  const [open, setOpen] = useState(false);
-  const [active, setActive] = useState<string | null>(null);
-  const [local, setLocal] = useState(items);
-  const [busy, setBusy] = useState<string | null>(null);
+import { DetailSheet } from "./detail-sheet";
+import { ActionMeaning } from "./action-connection";
+import type { ActionConnection } from "@/lib/life-os/experience";
+export type TodayItem = {
+  id: string;
+  title: string;
+  meta: string;
+  type: "task" | "habit" | "supplement";
+  done: boolean;
+  rank: number;
+  connection: ActionConnection;
+};
+type Part = {
+  label: string;
+  expected: number;
+  completed: number;
+  weight: number;
+  contribution?: number;
+  details?: {
+    ratio: number;
+    target: string;
+    actual: string;
+    reason: string;
+  } | null;
+};
+export function TodayControl({
+  score,
+  parts,
+  items,
+}: {
+  score: number;
+  status: string;
+  parts: Part[];
+  items: TodayItem[];
+}) {
+  const [confirmed, setConfirmed] = useState<Record<string, boolean>>({});
+  const [pending, setPending] = useState<string[]>([]);
+  const inFlight = useRef(new Set<string>());
   const [error, setError] = useState("");
-  const completed = local.filter((item) => item.done).length;
-  const total = local.length;
-  const liveScore = Math.min(100, score + Math.round((completed - items.filter((item) => item.done).length) * 100 / Math.max(total, 1)));
-
-  const complete = (item: Item) => {
-    if (item.done || busy) return;
-    setError(""); setBusy(item.id);
-    setLocal((current) => current.map((value) => value.id === item.id ? { ...value, done: true } : value));
-    void (async () => {
-      try { const result = await completeAction(item.type, item.id); if (!result.ok) throw new Error(result.error); router.refresh(); }
-      catch { setLocal((current) => current.map((value) => value.id === item.id ? { ...value, done: false } : value)); setError("Could not save that completion. Try again."); }
-      finally { setBusy(null); }
-    })();
-  };
-
-  return <>
-    <section className="today-instrument"><button className="score-orbit" onClick={() => setOpen(true)} aria-label="Explore today’s score"><svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="52" /><circle className="progress" cx="60" cy="60" r="52" pathLength="100" style={{ strokeDasharray: "100", strokeDashoffset: 100 - liveScore }} /></svg><span><strong>{liveScore}</strong><small>{status.replaceAll("_", " ")}</small></span></button><div><p className="eyebrow">Today’s control surface</p><h2>{total - completed} actions remain.</h2><p>Complete the essentials. The system updates as your day moves.</p></div></section>
-    <section className="action-console"><div className="console-head"><span>{completed}/{total} complete</span><i><b style={{ width: `${total ? completed / total * 100 : 0}%` }} /></i></div>{error ? <p className="notice" role="alert">{error}</p> : null}{local.map((item) => <button className={`action-tile ${item.done ? "done" : ""}`} key={item.id} disabled={item.done || busy === item.id} onClick={() => complete(item)}><span className="action-check">{item.done ? "✓" : ""}</span><span><strong>{item.title}</strong><small>{item.meta}</small></span><em>{busy === item.id ? "Saving" : item.done ? "Done" : "Complete"}</em></button>)}</section>
-    {open ? <div className="score-sheet" role="dialog" aria-modal="true" aria-label="Score explanation"><button className="sheet-backdrop" onClick={() => setOpen(false)} aria-label="Close score detail" /><article><button className="close" onClick={() => setOpen(false)}>Close</button><p className="eyebrow">Today {liveScore}</p><h3>Score layers</h3>{parts.filter((part) => !part.label.startsWith("Metric ·")).map((part) => { const rows = local.filter((item) => item.meta === part.label || part.label === "Health" && item.type === "supplement"); const contribution = part.contribution ?? Math.round(part.completed / Math.max(part.expected, 1) * part.weight); const metrics = part.label === "Health" ? parts.filter((item) => item.details) : []; return <div key={part.label} className={`score-layer ${active === part.label ? "selected" : ""}`}><button onClick={() => setActive(active === part.label ? null : part.label)}><span>{part.label}<small>Expected {part.expected} · Completed {part.completed}</small></span><strong>{contribution}/{Math.round(part.weight)}</strong></button>{active === part.label ? <div><p>{rows.length ? rows.map((item) => `${item.title}: expected 1, ${item.done ? "completed 1" : "completed 0"}`).join(" · ") : "No scored action recorded for this area."}</p>{metrics.map((metricPart) => { const metric = metricPart.details!; const metricContribution = metricPart.contribution ?? Math.round(metricPart.completed / Math.max(metricPart.expected, 1) * metricPart.weight); return <button key={metricPart.label} className="score-explanation" onClick={() => setActive(active === metricPart.label ? "Health" : metricPart.label)}><b>{metricPart.label.replace("Metric · ", "")}</b><span>Target: {metric.target}</span><span>Actual: {metric.actual}</span><span>Contribution: {metricContribution}/{Math.round(metricPart.weight)}</span><p>{metric.reason}</p></button>; })}</div> : null}</div>; })}</article></div> : null}
-  </>;
+  const [notice, setNotice] = useState("");
+  const [scoreOpen, setScoreOpen] = useState(false);
+  const [detail, setDetail] = useState<TodayItem | null>(null);
+  const [savedScore, setSavedScore] = useState<number | null>(null);
+  const [savedParts, setSavedParts] = useState<Part[] | null>(null);
+  const local = items.map((i) => ({
+    ...i,
+    done: i.done || confirmed[i.id] || pending.includes(i.id),
+  }));
+  const completed = local.filter((i) => i.done).length;
+  const remaining = local.filter((i) => !i.done);
+  const focus = remaining
+    .filter((i) => i.type !== "supplement")
+    .sort((a, b) => a.rank - b.rank)
+    .slice(0, 3);
+  const rest = local.filter((i) => !focus.some((f) => f.id === i.id));
+  async function complete(item: TodayItem) {
+    if (item.done || inFlight.current.size > 0) return;
+    inFlight.current.add(item.id);
+    setPending((p) => [...p, item.id]);
+    setError("");
+    setNotice("");
+    try {
+      const result = await completeAction(item.type, item.id);
+      if (!result.ok) throw new Error(result.error);
+      setConfirmed((p) => ({ ...p, [item.id]: true }));
+      setSavedScore(result.score);
+      setSavedParts(result.parts);
+      setNotice(`${item.title} saved.`);
+    } catch {
+      setError(
+        `Could not confirm ${item.title}. Your screen has been restored. Retry safely to confirm the saved state.`,
+      );
+    } finally {
+      inFlight.current.delete(item.id);
+      setPending((p) => p.filter((id) => id !== item.id));
+    }
+  }
+  const row = (item: TodayItem, index?: number) => (
+    <article
+      key={item.id}
+      className={`daily-action ${item.done ? "is-done" : ""}`}
+    >
+      <button
+        className="completion-toggle"
+        onClick={() => complete(item)}
+        disabled={item.done || pending.length > 0}
+        aria-label={`${item.done ? "Completed" : "Complete"} ${item.title}`}
+      >
+        <span aria-hidden="true">
+          {item.done ? "✓" : index != null ? `0${index + 1}` : ""}
+        </span>
+      </button>
+      <div>
+        <strong>{item.title}</strong>
+        <small>
+          {pending.includes(item.id)
+            ? "Saving…"
+            : item.done
+              ? "Completed"
+              : item.connection.objective
+                ? `${item.connection.area} · ${item.connection.objective}`
+                : item.meta}
+        </small>
+      </div>
+      <button
+        className="text-button"
+        onClick={() => setDetail(item)}
+        aria-label={`Why ${item.title}?`}
+      >
+        Why?
+      </button>
+    </article>
+  );
+  return (
+    <>
+      <section className="today-overview">
+        <div>
+          <p className="eyebrow">
+            {remaining.length
+              ? "Start with what matters"
+              : "Your scheduled actions are complete"}
+          </p>
+          <h2>
+            {completed === 0
+              ? "A deliberate day starts here."
+              : remaining.length
+                ? `${completed} done. Keep the essentials moving.`
+                : "Enough for today."}
+          </h2>
+          <p>
+            {completed} of {items.length} scheduled actions recorded
+            {pending.length ? " · Saving progress…" : "."}
+          </p>
+          <div
+            className="completion-track"
+            role="progressbar"
+            aria-label="Actions completed"
+            aria-valuenow={completed}
+            aria-valuemax={items.length || 1}
+          >
+            <span
+              style={{
+                width: `${items.length ? (completed / items.length) * 100 : 0}%`,
+              }}
+            />
+          </div>
+        </div>
+        <button
+          className="today-score"
+          onClick={() => setScoreOpen(true)}
+          aria-label="Explore today's score"
+        >
+          <strong>{savedScore ?? score}</strong>
+          <span>Daily score / 100</span>
+          <small>
+            {pending.length ? "Updates when saved" : "See calculation →"}
+          </small>
+        </button>
+      </section>
+      <section className="daily-focus">
+        <div className="section-heading">
+          <h3>{focus.length ? "What matters now" : "Daily rhythm"}</h3>
+          <Link href="/check-in">Check in →</Link>
+        </div>
+        {focus.map((item, index) => row(item, index))}
+        {focus.length === 0 && (
+          <p className="muted">
+            {remaining.length
+              ? "Only your remaining protocol items are below."
+              : "No need to add more just to fill the day."}
+          </p>
+        )}
+      </section>
+      {error && (
+        <p className="error-notice" role="alert">
+          {error}
+        </p>
+      )}
+      <p className="sr-only" role="status">
+        {notice}
+      </p>
+      {rest.length > 0 && (
+        <details
+          className="daily-rest"
+          open={focus.length === 0 && remaining.length > 0}
+        >
+          <summary>
+            Rest of the day{" "}
+            <span>
+              {rest.filter((i) => !i.done).length} remaining · {completed}{" "}
+              completed
+            </span>
+          </summary>
+          {rest.map((i) => row(i))}
+        </details>
+      )}
+      {detail && (
+        <DetailSheet title={detail.title} onClose={() => setDetail(null)}>
+          <ActionMeaning connection={detail.connection} />
+        </DetailSheet>
+      )}
+      {scoreOpen && (
+        <DetailSheet
+          title="What your daily score means"
+          onClose={() => setScoreOpen(false)}
+        >
+          <p>
+            Completion against your configured schedule and recorded metrics.
+            This is a daily snapshot, not a verdict on your life or your
+            long-term progress.
+          </p>
+          <div className="score-breakdown">
+            {(savedParts ?? parts).map((part) => (
+              <details key={part.label}>
+                <summary>
+                  <strong>{part.label.replace("Metric · ", "")}</strong>
+                  <span>
+                    {part.details
+                      ? `${Math.round(part.details.ratio * 100)}% of target`
+                      : `${part.completed}/${part.expected} complete`}
+                  </span>
+                </summary>
+                {part.details ? (
+                  <dl>
+                    <dt>Target</dt>
+                    <dd>{part.details.target}</dd>
+                    <dt>Actual</dt>
+                    <dd>{part.details.actual}</dd>
+                    <dt>Reason</dt>
+                    <dd>{part.details.reason}</dd>
+                  </dl>
+                ) : (
+                  <ul>
+                    {local
+                      .filter((i) => i.meta === part.label)
+                      .map((i) => (
+                        <li key={i.id}>
+                          {i.title}: {i.done ? "completed" : "not completed"}
+                        </li>
+                      ))}
+                  </ul>
+                )}
+                <p>
+                  Weighted contribution: {part.contribution ?? 0}/{part.weight}.
+                  The overall score normalises across the included weights.
+                </p>
+              </details>
+            ))}
+          </div>
+          <Link href="/dashboard">See progress over time →</Link>
+        </DetailSheet>
+      )}
+    </>
+  );
 }
